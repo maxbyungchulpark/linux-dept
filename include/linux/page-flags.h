@@ -345,9 +345,6 @@ static inline void dept_folio_wait_on_bit(struct folio *f, int bit_nr)
 #define dept_folio_wait_on_bit(f, bit_nr)	do { } while (0)
 #endif
 
-#ifdef CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP
-DECLARE_STATIC_KEY_FALSE(hugetlb_optimize_vmemmap_key);
-
 /*
  * For tail pages, if the size of struct page is power-of-2 ->compound_info
  * encodes the mask that converts the address of the tail page address to
