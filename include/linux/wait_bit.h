@@ -276,8 +276,8 @@ extern wait_queue_head_t *__var_waitqueue(void *p);
 		cmd;							\
 	}								\
 	finish_wait(__wq_head, &__wbq_entry.wq_entry);			\
-	sdt_might_sleep_end();						\
-__out:	__ret;								\
+__out:	sdt_might_sleep_end();						\
+	__ret;								\
 })
 
 #define __wait_var_event(var, condition)				\

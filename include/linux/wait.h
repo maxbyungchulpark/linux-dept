@@ -325,8 +325,8 @@ extern void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
 			break;							\
 	}									\
 	finish_wait(&wq_head, &__wq_entry);					\
-	sdt_might_sleep_end();							\
-__out:	__ret;									\
+__out:	sdt_might_sleep_end();							\
+	__ret;									\
 })
 
 #define __wait_event(wq_head, condition)					\

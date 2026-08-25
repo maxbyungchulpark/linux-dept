@@ -178,8 +178,8 @@ extern void finish_swait(struct swait_queue_head *q, struct swait_queue *wait);
 		cmd;							\
 	}								\
 	finish_swait(&wq, &__wait);					\
-	sdt_might_sleep_end();						\
-__out:	__ret;								\
+__out:	sdt_might_sleep_end();						\
+	__ret;								\
 })
 
 #define __swait_event(wq, condition)					\
