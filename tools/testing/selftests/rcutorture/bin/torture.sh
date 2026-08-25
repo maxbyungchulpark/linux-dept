@@ -94,6 +94,7 @@ usage () {
 	echo "       --do-kvfree / --do-no-kvfree / --no-kvfree"
 	echo "       --do-locktorture / --do-no-locktorture / --no-locktorture"
 	echo "       --do-none"
+	echo "       --do-normal / --do-no-normal / --no-normal"
 	echo "       --do-rcuscale / --do-no-rcuscale / --no-rcuscale"
 	echo "       --do-rcutasksflavors / --do-no-rcutasksflavors / --no-rcutasksflavors"
 	echo "       --do-rcutorture / --do-no-rcutorture / --no-rcutorture"
@@ -183,7 +184,7 @@ do
 		do_clocksourcewd=no
 		do_srcu_lockdep=no
 		;;
-	--do-normal|--do-no-normal|--no-normal)
+	--do-normal|--do-norm|--do-no-normal|--do-no-norm|--no-normal|--no-norm)
 		do_normal=`doyesno "$1" --do-normal`
 		explicit_normal=yes
 		;;

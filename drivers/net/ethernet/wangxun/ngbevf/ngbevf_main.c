@@ -14,6 +14,7 @@
 #include "../libwx/wx_mbx.h"
 #include "../libwx/wx_vf.h"
 #include "../libwx/wx_vf_common.h"
+#include "../libwx/wx_ethtool.h"
 #include "ngbevf_type.h"
 
 /* ngbevf_pci_tbl - PCI Device ID Table
@@ -25,20 +26,20 @@
  *   Class, Class Mask, private data (not used) }
  */
 static const struct pci_device_id ngbevf_pci_tbl[] = {
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL_W), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A2), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A2S), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A4), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A4S), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL2), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL2S), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL4), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL4S), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860NCSI), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A1), 0},
-	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL1), 0},
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL_W) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A2) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A2S) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A4) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A4S) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL2) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL2S) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL4) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL4S) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860NCSI) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860A1) },
+	{ PCI_VDEVICE(WANGXUN, NGBEVF_DEV_ID_EM_WX1860AL1) },
 	/* required last entry */
-	{ .device = 0 }
+	{ }
 };
 
 static const struct net_device_ops ngbevf_netdev_ops = {
@@ -100,6 +101,7 @@ static int ngbevf_sw_init(struct wx *wx)
 	wx->mac.max_tx_queues = NGBEVF_MAX_TX_QUEUES;
 	wx->mac.max_rx_queues = NGBEVF_MAX_RX_QUEUES;
 	/* Enable dynamic interrupt throttling rates */
+	wx->adaptive_itr = true;
 	wx->rx_itr_setting = 1;
 	wx->tx_itr_setting = 1;
 	/* set default ring sizes */
@@ -185,6 +187,8 @@ static int ngbevf_probe(struct pci_dev *pdev,
 		goto err_pci_release_regions;
 	}
 
+	wx->driver_name = KBUILD_MODNAME;
+	wx_set_ethtool_ops_vf(netdev);
 	netdev->netdev_ops = &ngbevf_netdev_ops;
 
 	/* setup the private structure */
@@ -202,6 +206,7 @@ static int ngbevf_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_free_sw_init;
 
+	wx_get_fw_version_vf(wx);
 	err = register_netdev(netdev);
 	if (err)
 		goto err_register;

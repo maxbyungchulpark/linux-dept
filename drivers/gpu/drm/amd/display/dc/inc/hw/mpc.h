@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-15 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -66,7 +66,6 @@ enum mpc_output_csc_mode {
 	MPC_OUTPUT_CSC_COEF_B
 };
 
-
 enum mpcc_blend_mode {
 	MPCC_BLEND_MODE_BYPASS,
 	MPCC_BLEND_MODE_TOP_LAYER_PASSTHROUGH,
@@ -113,6 +112,16 @@ enum MCM_LUT_ID {
 	MCM_LUT_3DLUT,
 	MCM_LUT_1DLUT,
 	MCM_LUT_SHAPER
+};
+
+struct mpc_fl_3dlut_config {
+	bool enabled;
+	uint16_t width;
+	bool select_lut_bank_a;
+	uint16_t bit_depth;
+	int hubp_index;
+	uint16_t bias;
+	uint16_t scale;
 };
 
 union mcm_lut_params {
@@ -340,6 +349,15 @@ struct mpcc_state {
 	struct mpc_rmcm_regs rmcm_regs;
 };
 
+struct dcn_mpc_reg_state {
+	uint32_t mpcc_bot_sel;
+	uint32_t mpcc_control;
+	uint32_t mpcc_status;
+	uint32_t mpcc_top_sel;
+	uint32_t mpcc_opp_id;
+	uint32_t mpcc_ogam_control;
+};
+
 /**
  * struct mpc_funcs - funcs
  */
@@ -363,6 +381,24 @@ struct mpc_funcs {
 			struct mpc *mpc,
 			int mpcc_inst,
 			struct mpcc_state *s);
+	/**
+    * @mpc_read_reg_state:
+    *
+    * Read MPC register state for debugging underflow purposes.
+    *
+    * Parameters:
+    *
+    * - [in] mpc - MPC context
+    * - [out] reg_state - MPC register state structure
+    *
+    * Return:
+    *
+    * void
+    */
+	void (*mpc_read_reg_state)(
+			struct mpc *mpc,
+			int mpcc_inst,
+			struct dcn_mpc_reg_state *mpc_reg_state);
 
 	/**
 	* @insert_plane:
@@ -1006,6 +1042,24 @@ struct mpc_funcs {
 	void (*update_3dlut_fast_load_select)(struct mpc *mpc, int mpcc_id, int hubp_idx);
 
 	/**
+	* @get_3dlut_fast_load_status:
+	*
+	* Get 3D LUT fast load status and reference them with done, soft_underflow and hard_underflow pointers.
+	*
+	* Parameters:
+	* - [in/out] mpc - MPC context.
+	* - [in] mpcc_id
+	* - [in/out] done
+	* - [in/out] soft_underflow
+	* - [in/out] hard_underflow
+	*
+	* Return:
+	*
+	* void
+	*/
+	void (*get_3dlut_fast_load_status)(struct mpc *mpc, int mpcc_id, uint32_t *done, uint32_t *soft_underflow, uint32_t *hard_underflow);
+
+	/**
 	* @populate_lut:
 	*
 	* Populate LUT with given tetrahedral parameters.
@@ -1059,21 +1113,6 @@ struct mpc_funcs {
 	*/
 	void (*program_lut_mode)(struct mpc *mpc, const enum MCM_LUT_ID id, const enum MCM_LUT_XABLE xable,
 			bool lut_bank_a, int mpcc_id);
-	/**
-	* @program_3dlut_size:
-	*
-	* Program 3D LUT size.
-	*
-	* Parameters:
-	* - [in/out] mpc - MPC context.
-	* - [in] is_17x17x17 - is 3dlut 17x17x17
-	* - [in] mpcc_id
-	*
-	* Return:
-	*
-	* void
-	*/
-	void (*program_3dlut_size)(struct mpc *mpc, bool is_17x17x17, int mpcc_id);
 
 	/**
 	 * @mcm:
@@ -1098,6 +1137,7 @@ struct mpc_funcs {
 	 * MPC RMCM new HW sequential programming functions
 	 */
 	struct {
+		void (*fl_3dlut_configure)(struct mpc *mpc, struct mpc_fl_3dlut_config *cfg, int mpcc_id);
 		void (*enable_3dlut_fl)(struct mpc *mpc, bool enable, int mpcc_id);
 		void (*update_3dlut_fast_load_select)(struct mpc *mpc, int mpcc_id, int hubp_idx);
 		void (*program_lut_read_write_control)(struct mpc *mpc, const enum MCM_LUT_ID id,

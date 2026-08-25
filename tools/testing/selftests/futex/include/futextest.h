@@ -38,6 +38,12 @@ typedef volatile u_int32_t futex_t;
 #ifndef FUTEX_CMP_REQUEUE_PI
 #define FUTEX_CMP_REQUEUE_PI		12
 #endif
+#ifndef FUTEX_ROBUST_UNLOCK
+#define FUTEX_ROBUST_UNLOCK		512
+#endif
+#ifndef FUTEX_ROBUST_LIST32
+#define FUTEX_ROBUST_LIST32		1024
+#endif
 #ifndef FUTEX_WAIT_REQUEUE_PI_PRIVATE
 #define FUTEX_WAIT_REQUEUE_PI_PRIVATE	(FUTEX_WAIT_REQUEUE_PI | \
 					 FUTEX_PRIVATE_FLAG)
@@ -56,6 +62,17 @@ typedef volatile u_int32_t futex_t;
  */
 #if !defined(SYS_futex) && defined(SYS_futex_time64)
 #define SYS_futex SYS_futex_time64
+#endif
+
+/*
+ * On 32bit systems if we use "-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64" or if
+ * we are using a newer compiler then the size of the timestamps will be 64bit,
+ * however, the SYS_futex will still point to the 32bit futex system call.
+ */
+#if __SIZEOF_POINTER__ == 4 && defined(SYS_futex_time64) && \
+	defined(_TIME_BITS) && _TIME_BITS == 64
+# undef SYS_futex
+# define SYS_futex SYS_futex_time64
 #endif
 
 /**

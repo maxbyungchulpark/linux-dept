@@ -12,7 +12,6 @@
 
 #include <linux/clk.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
@@ -367,7 +366,6 @@ static const struct rzg2l_cru_info rzg3e_cru_info = {
 	.enable_interrupts = rzg3e_cru_enable_interrupts,
 	.disable_interrupts = rzg3e_cru_disable_interrupts,
 	.fifo_empty = rzg3e_fifo_empty,
-	.csi_setup = rzg3e_cru_csi2_setup,
 };
 
 static const u16 rzg2l_cru_regs[] = {
@@ -412,7 +410,6 @@ static const struct rzg2l_cru_info rzg2l_cru_info = {
 	.enable_interrupts = rzg2l_cru_enable_interrupts,
 	.disable_interrupts = rzg2l_cru_disable_interrupts,
 	.fifo_empty = rzg2l_fifo_empty,
-	.csi_setup = rzg2l_cru_csi2_setup,
 };
 
 static const struct of_device_id rzg2l_cru_of_id_table[] = {

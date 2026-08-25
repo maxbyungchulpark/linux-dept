@@ -15,7 +15,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/mfd/adp5585.h>
 #include <linux/mfd/core.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -432,7 +431,6 @@ static int adp5585_reset_ev_parse(struct adp5585_dev *adp5585)
 					     "Invalid value(%u) for adi,reset-pulse-width-us\n",
 					     prop_val);
 		}
-		return ret;
 	}
 
 	return 0;

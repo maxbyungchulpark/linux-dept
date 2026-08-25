@@ -1437,9 +1437,10 @@ static int ov2659_probe(struct i2c_client *client)
 	ov2659->pdata = pdata;
 	ov2659->client = client;
 
-	ov2659->clk = devm_clk_get(&client->dev, "xvclk");
+	ov2659->clk = devm_v4l2_sensor_clk_get(&client->dev, "xvclk");
 	if (IS_ERR(ov2659->clk))
-		return PTR_ERR(ov2659->clk);
+		return dev_err_probe(&client->dev, PTR_ERR(ov2659->clk),
+				     "failed to get xvclk\n");
 
 	ov2659->xvclk_frequency = clk_get_rate(ov2659->clk);
 	if (ov2659->xvclk_frequency < 6000000 ||
@@ -1552,7 +1553,7 @@ static const struct dev_pm_ops ov2659_pm_ops = {
 };
 
 static const struct i2c_device_id ov2659_id[] = {
-	{ "ov2659" },
+	{ .name = "ov2659" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, ov2659_id);

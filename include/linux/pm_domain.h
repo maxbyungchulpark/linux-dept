@@ -49,8 +49,8 @@
 
 struct dev_pm_domain_attach_data {
 	const char * const *pd_names;
-	const u32 num_pd_names;
-	const u32 pd_flags;
+	u32 num_pd_names;
+	u32 pd_flags;
 };
 
 struct dev_pm_domain_list {
@@ -115,6 +115,12 @@ struct dev_pm_domain_list {
  *				genpd provider specific way, likely through a
  *				parent device node. This flag makes genpd to
  *				skip its internal support for this.
+ *
+ * GENPD_FLAG_NO_STAY_ON:	For genpd OF providers a powered-on PM domain at
+ *				initialization is prevented from being
+ *				powered-off until the ->sync_state() callback is
+ *				invoked. This flag informs genpd to allow a
+ *				power-off without waiting for ->sync_state().
  */
 #define GENPD_FLAG_PM_CLK	 (1U << 0)
 #define GENPD_FLAG_IRQ_SAFE	 (1U << 1)
@@ -126,6 +132,7 @@ struct dev_pm_domain_list {
 #define GENPD_FLAG_OPP_TABLE_FW	 (1U << 7)
 #define GENPD_FLAG_DEV_NAME_FW	 (1U << 8)
 #define GENPD_FLAG_NO_SYNC_STATE (1U << 9)
+#define GENPD_FLAG_NO_STAY_ON	 (1U << 10)
 
 enum gpd_status {
 	GENPD_STATE_ON = 0,	/* PM domain is on */
@@ -146,6 +153,7 @@ enum genpd_sync_state {
 };
 
 struct dev_power_governor {
+	bool (*system_power_down_ok)(struct dev_pm_domain *domain);
 	bool (*power_down_ok)(struct dev_pm_domain *domain);
 	bool (*suspend_ok)(struct device *dev);
 };
@@ -175,6 +183,7 @@ struct genpd_power_state {
 	u64 rejected;
 	u64 above;
 	u64 below;
+	u64 usage_s2idle;
 	struct fwnode_handle *fwnode;
 	u64 idle_time;
 	void *data;
@@ -458,6 +467,10 @@ struct generic_pm_domain *of_genpd_remove_last(struct device_node *np);
 int of_genpd_parse_idle_states(struct device_node *dn,
 			       struct genpd_power_state **states, int *n);
 void of_genpd_sync_state(struct device_node *np);
+int of_genpd_add_child_ids(struct device_node *np,
+			   struct genpd_onecell_data *data);
+int of_genpd_remove_child_ids(struct device_node *np,
+			      struct genpd_onecell_data *data);
 
 int genpd_dev_pm_attach(struct device *dev);
 struct device *genpd_dev_pm_attach_by_id(struct device *dev,
@@ -526,6 +539,18 @@ static inline
 struct generic_pm_domain *of_genpd_remove_last(struct device_node *np)
 {
 	return ERR_PTR(-EOPNOTSUPP);
+}
+
+static inline int of_genpd_add_child_ids(struct device_node *np,
+					 struct genpd_onecell_data *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int of_genpd_remove_child_ids(struct device_node *np,
+					    struct genpd_onecell_data *data)
+{
+	return -EOPNOTSUPP;
 }
 #endif /* CONFIG_PM_GENERIC_DOMAINS_OF */
 

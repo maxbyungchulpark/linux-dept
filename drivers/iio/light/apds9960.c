@@ -234,7 +234,7 @@ static const struct regmap_config apds9960_regmap_config = {
 	.reg_defaults = apds9960_reg_defaults,
 	.num_reg_defaults = ARRAY_SIZE(apds9960_reg_defaults),
 	.max_register = APDS9960_REG_GFIFO_DIR(RIGHT),
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static const struct iio_event_spec apds9960_pxs_event_spec[] = {
@@ -495,7 +495,6 @@ static int apds9960_set_power_state(struct apds9960_data *data, bool on)
 			usleep_range(data->als_adc_int_us,
 				     APDS9960_MAX_INT_TIME_IN_US);
 	} else {
-		pm_runtime_mark_last_busy(dev);
 		ret = pm_runtime_put_autosuspend(dev);
 	}
 
@@ -1155,7 +1154,7 @@ static const struct dev_pm_ops apds9960_pm_ops = {
 };
 
 static const struct i2c_device_id apds9960_id[] = {
-	{ "apds9960" },
+	{ .name = "apds9960" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, apds9960_id);

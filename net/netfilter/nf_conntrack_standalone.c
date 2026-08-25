@@ -61,7 +61,6 @@ print_tuple(struct seq_file *s, const struct nf_conntrack_tuple *tuple,
 			   ntohs(tuple->src.u.tcp.port),
 			   ntohs(tuple->dst.u.tcp.port));
 		break;
-	case IPPROTO_UDPLITE:
 	case IPPROTO_UDP:
 		seq_printf(s, "sport=%hu dport=%hu ",
 			   ntohs(tuple->src.u.udp.port),
@@ -277,7 +276,6 @@ static const char* l4proto_name(u16 proto)
 	case IPPROTO_UDP: return "udp";
 	case IPPROTO_GRE: return "gre";
 	case IPPROTO_SCTP: return "sctp";
-	case IPPROTO_UDPLITE: return "udplite";
 	case IPPROTO_ICMPV6: return "icmpv6";
 	}
 
@@ -317,6 +315,9 @@ static int ct_seq_show(struct seq_file *s, void *v)
 	smp_acquire__after_ctrl_dep();
 
 	if (nf_ct_should_gc(ct)) {
+		struct ct_iter_state *st = s->private;
+
+		st->skip_elems--;
 		nf_ct_kill(ct);
 		goto release;
 	}
@@ -567,16 +568,16 @@ nf_conntrack_log_invalid_sysctl(const struct ctl_table *table, int write,
 		return ret;
 
 	if (*(u8 *)table->data == 0)
-		return ret;
+		return 0;
 
 	/* Load nf_log_syslog only if no logger is currently registered */
 	for (i = 0; i < NFPROTO_NUMPROTO; i++) {
 		if (nf_log_is_registered(i))
-			return ret;
+			return 0;
 	}
 	request_module("%s", "nf_log_syslog");
 
-	return ret;
+	return 0;
 }
 
 static struct ctl_table_header *nf_ct_netfilter_header;
@@ -645,7 +646,7 @@ static struct ctl_table nf_ct_sysctl_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= SYSCTL_ONE,
 		.extra2		= SYSCTL_INT_MAX,
 	},
 	[NF_SYSCTL_CT_COUNT] = {
@@ -926,7 +927,7 @@ static struct ctl_table nf_ct_netfilter_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
+		.extra1		= SYSCTL_ONE,
 		.extra2		= SYSCTL_INT_MAX,
 	},
 };

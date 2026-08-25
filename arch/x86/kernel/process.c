@@ -89,6 +89,16 @@ DEFINE_PER_CPU(bool, __tss_limit_invalid);
 EXPORT_PER_CPU_SYMBOL_GPL(__tss_limit_invalid);
 
 /*
+ * The cache may be in an incoherent state and needs flushing during kexec.
+ * E.g., on SME/TDX platforms, dirty cacheline aliases with and without
+ * encryption bit(s) can coexist and the cache needs to be flushed before
+ * booting to the new kernel to avoid the silent memory corruption due to
+ * dirty cachelines with different encryption property being written back
+ * to the memory.
+ */
+DEFINE_PER_CPU(bool, cache_state_incoherent);
+
+/*
  * this gets called so that we can store lazy state into memory and copy the
  * current task into the new thread.
  */
@@ -159,7 +169,7 @@ __visible void ret_from_fork(struct task_struct *prev, struct pt_regs *regs,
 
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
-	unsigned long clone_flags = args->flags;
+	u64 clone_flags = args->flags;
 	unsigned long sp = args->stack;
 	unsigned long tls = args->tls;
 	struct inactive_task_frame *frame;
@@ -476,6 +486,7 @@ void native_tss_update_io_bitmap(void)
 		if (WARN_ON_ONCE(!iobm)) {
 			clear_thread_flag(TIF_IO_BITMAP);
 			native_tss_invalidate_io_bitmap();
+			return;
 		}
 
 		/*
@@ -827,19 +838,7 @@ void __noreturn stop_this_cpu(void *dummy)
 	disable_local_APIC();
 	mcheck_cpu_clear(c);
 
-	/*
-	 * Use wbinvd on processors that support SME. This provides support
-	 * for performing a successful kexec when going from SME inactive
-	 * to SME active (or vice-versa). The cache must be cleared so that
-	 * if there are entries with the same physical address, both with and
-	 * without the encryption bit, they don't race each other when flushed
-	 * and potentially end up with the wrong entry being committed to
-	 * memory.
-	 *
-	 * Test the CPUID bit directly because the machine might've cleared
-	 * X86_FEATURE_SME due to cmdline options.
-	 */
-	if (c->extended_cpuid_level >= 0x8000001f && (cpuid_eax(0x8000001f) & BIT(0)))
+	if (this_cpu_read(cache_state_incoherent))
 		wbinvd();
 
 	/*
@@ -971,7 +970,7 @@ void amd_e400_c1e_apic_setup(void)
 
 void __init arch_post_acpi_subsys_init(void)
 {
-	u32 lo, hi;
+	u64 val;
 
 	if (!boot_cpu_has_bug(X86_BUG_AMD_E400))
 		return;
@@ -981,8 +980,8 @@ void __init arch_post_acpi_subsys_init(void)
 	 * the machine is affected K8_INTP_C1E_ACTIVE_MASK bits are set in
 	 * MSR_K8_INT_PENDING_MSG.
 	 */
-	rdmsr(MSR_K8_INT_PENDING_MSG, lo, hi);
-	if (!(lo & K8_INTP_C1E_ACTIVE_MASK))
+	rdmsrq(MSR_K8_INT_PENDING_MSG, val);
+	if (!(val & K8_INTP_C1E_ACTIVE_MASK))
 		return;
 
 	boot_cpu_set_bug(X86_BUG_AMD_APIC_C1E);

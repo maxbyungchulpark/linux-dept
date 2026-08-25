@@ -20,7 +20,6 @@
 #include <linux/mfd/adp5585.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 #include <linux/regmap.h>
@@ -190,13 +189,13 @@ static int adp5585_pwm_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct adp5585_pwm_chip adp5589_pwm_chip_info = {
+static const struct adp5585_pwm_chip adp5585_pwm_chip_info = {
 	.pwm_cfg = ADP5585_PWM_CFG,
 	.pwm_offt_low = ADP5585_PWM_OFFT_LOW,
 	.pwm_ont_low = ADP5585_PWM_ONT_LOW,
 };
 
-static const struct adp5585_pwm_chip adp5585_pwm_chip_info = {
+static const struct adp5585_pwm_chip adp5589_pwm_chip_info = {
 	.pwm_cfg = ADP5589_PWM_CFG,
 	.pwm_offt_low = ADP5589_PWM_OFFT_LOW,
 	.pwm_ont_low = ADP5589_PWM_ONT_LOW,

@@ -98,7 +98,7 @@ no_valid_dev_replace_entry_found:
 		 * We don't have a replace item or it's corrupted.  If there is
 		 * a replace target, fail the mount.
 		 */
-		if (btrfs_find_device(fs_info->fs_devices, &args)) {
+		if (unlikely(btrfs_find_device(fs_info->fs_devices, &args))) {
 			btrfs_err(fs_info,
 			"found replace target device without a valid replace item");
 			return -EUCLEAN;
@@ -158,7 +158,7 @@ no_valid_dev_replace_entry_found:
 		 * We don't have an active replace item but if there is a
 		 * replace target, fail the mount.
 		 */
-		if (btrfs_find_device(fs_info->fs_devices, &args)) {
+		if (unlikely(btrfs_find_device(fs_info->fs_devices, &args))) {
 			btrfs_err(fs_info,
 "replace without active item, run 'device scan --forget' on the target device");
 			ret = -EUCLEAN;
@@ -177,8 +177,7 @@ no_valid_dev_replace_entry_found:
 		 * allow 'btrfs dev replace_cancel' if src/tgt device is
 		 * missing
 		 */
-		if (!dev_replace->srcdev &&
-		    !btrfs_test_opt(fs_info, DEGRADED)) {
+		if (unlikely(!dev_replace->srcdev && !btrfs_test_opt(fs_info, DEGRADED))) {
 			ret = -EIO;
 			btrfs_warn(fs_info,
 			   "cannot mount because device replace operation is ongoing and");
@@ -186,8 +185,7 @@ no_valid_dev_replace_entry_found:
 			   "srcdev (devid %llu) is missing, need to run 'btrfs dev scan'?",
 			   src_devid);
 		}
-		if (!dev_replace->tgtdev &&
-		    !btrfs_test_opt(fs_info, DEGRADED)) {
+		if (unlikely(!dev_replace->tgtdev && !btrfs_test_opt(fs_info, DEGRADED))) {
 			ret = -EIO;
 			btrfs_warn(fs_info,
 			   "cannot mount because device replace operation is ongoing and");
@@ -309,6 +307,8 @@ static int btrfs_init_dev_replace_tgtdev(struct btrfs_fs_info *fs_info,
 	device->bdev_file = bdev_file;
 	set_bit(BTRFS_DEV_STATE_IN_FS_METADATA, &device->dev_state);
 	set_bit(BTRFS_DEV_STATE_REPLACE_TGT, &device->dev_state);
+	/* Check the comment in btrfs_init_new_device() for the reason. */
+	atomic_inc(&device->dev_stats_ccnt);
 	device->dev_stats_valid = 1;
 	set_blocksize(bdev_file, BTRFS_BDEV_BLOCKSIZE);
 	device->fs_devices = fs_devices;
@@ -491,8 +491,8 @@ static int mark_block_group_to_copy(struct btrfs_fs_info *fs_info,
 	}
 
 	path->reada = READA_FORWARD;
-	path->search_commit_root = 1;
-	path->skip_locking = 1;
+	path->search_commit_root = true;
+	path->skip_locking = true;
 
 	key.objectid = src_dev->devid;
 	key.type = BTRFS_DEV_EXTENT_KEY;
@@ -637,7 +637,7 @@ static int btrfs_dev_replace_start(struct btrfs_fs_info *fs_info,
 		break;
 	case BTRFS_IOCTL_DEV_REPLACE_STATE_STARTED:
 	case BTRFS_IOCTL_DEV_REPLACE_STATE_SUSPENDED:
-		DEBUG_WARN("unexpected STARTED ot SUSPENDED dev-replace state");
+		DEBUG_WARN("unexpected STARTED or SUSPENDED dev-replace state");
 		ret = BTRFS_IOCTL_DEV_REPLACE_RESULT_ALREADY_STARTED;
 		up_write(&dev_replace->rwsem);
 		goto leave;
@@ -699,7 +699,7 @@ static int btrfs_dev_replace_start(struct btrfs_fs_info *fs_info,
 	/* the disk copy procedure reuses the scrub code */
 	ret = btrfs_scrub_dev(fs_info, src_device->devid, 0,
 			      btrfs_device_get_total_bytes(src_device),
-			      &dev_replace->scrub_progress, 0, 1);
+			      &dev_replace->scrub_progress, false, true);
 
 	ret = btrfs_dev_replace_finishing(fs_info, ret);
 	if (ret == -EINPROGRESS)
@@ -1015,8 +1015,15 @@ error:
 
 	/* write back the superblocks */
 	trans = btrfs_start_transaction(root, 0);
-	if (!IS_ERR(trans))
+	if (!IS_ERR(trans)) {
+		/*
+		 * Ignore any error here, if we failed to remove the DEV_STATS
+		 * item for devid 0, it's not a big deal.  We have other ways
+		 * to address it.
+		 */
+		btrfs_remove_dev_stat_item(trans, BTRFS_DEV_REPLACE_DEVID);
 		btrfs_commit_transaction(trans);
+	}
 
 	mutex_unlock(&dev_replace->lock_finishing_cancel_unmount);
 
@@ -1257,7 +1264,7 @@ static int btrfs_dev_replace_kthread(void *data)
 	ret = btrfs_scrub_dev(fs_info, dev_replace->srcdev->devid,
 			      dev_replace->committed_cursor_left,
 			      btrfs_device_get_total_bytes(dev_replace->srcdev),
-			      &dev_replace->scrub_progress, 0, 1);
+			      &dev_replace->scrub_progress, false, true);
 	ret = btrfs_dev_replace_finishing(fs_info, ret);
 	WARN_ON(ret && ret != -ECANCELED);
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Driver for panels based on Sitronix ST7703 controller, souch as:
+ * Driver for panels based on Sitronix ST7703 controller, such as:
  *
  * - Rocktech jh057n00900 5.5" MIPI-DSI panel
  *
@@ -11,7 +11,6 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/media-bus-format.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>

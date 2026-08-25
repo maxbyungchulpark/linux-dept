@@ -63,6 +63,7 @@
 #include <linux/stat.h>
 #include <linux/init.h>
 
+#include <net/flow.h>
 #include <net/snmp.h>
 #include <net/ip.h>
 #include <net/protocol.h>
@@ -83,6 +84,7 @@
 #include <linux/netfilter_bridge.h>
 #include <linux/netlink.h>
 #include <linux/tcp.h>
+#include <net/psp.h>
 
 static int
 ip_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
@@ -193,7 +195,6 @@ int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
 	/* Send it out. */
 	return ip_local_out(net, skb->sk, skb);
 }
-EXPORT_SYMBOL_GPL(ip_build_and_send_pkt);
 
 static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
@@ -485,7 +486,7 @@ int __ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		inet_sk_init_flowi4(inet, fl4);
 
 		/* sctp_v4_xmit() uses its own DSCP value */
-		fl4->flowi4_tos = tos & INET_DSCP_MASK;
+		fl4->flowi4_dscp = inet_dsfield_to_dscp(tos);
 
 		/* If this fails, retransmit mechanism of transport layer will
 		 * keep trying until route appears or the connection times
@@ -1115,8 +1116,8 @@ alloc_new_skb:
 				  !(rt->dst.dev->features & NETIF_F_SG)))
 				alloclen = fraglen;
 			else {
-				alloclen = fragheaderlen + transhdrlen;
-				pagedlen = datalen - transhdrlen;
+				alloclen = fragheaderlen + transhdrlen + fraggap;
+				pagedlen = datalen - transhdrlen - fraggap;
 			}
 
 			alloclen += alloc_extra;
@@ -1163,9 +1164,6 @@ alloc_new_skb:
 			}
 
 			copy = datalen - transhdrlen - fraggap - pagedlen;
-			/* [!] NOTE: copy will be negative if pagedlen>0
-			 * because then the equation reduces to -fraggap.
-			 */
 			if (copy > 0 &&
 			    INDIRECT_CALL_1(getfrag, ip_generic_getfrag,
 					    from, data + transhdrlen, offset,
@@ -1231,6 +1229,8 @@ alloc_new_skb:
 			if (err < 0)
 				goto error;
 			copy = err;
+			if (!(flags & MSG_NO_SHARED_FRAGS))
+				skb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;
 			wmem_alloc_delta += copy;
 		} else if (!zc) {
 			int i = skb_shinfo(skb)->nr_frags;
@@ -1298,7 +1298,7 @@ static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
 		return -EFAULT;
 
 	cork->fragsize = ip_sk_use_pmtu(sk) ?
-			 dst_mtu(&rt->dst) : READ_ONCE(rt->dst.dev->mtu);
+			 dst4_mtu(&rt->dst) : READ_ONCE(rt->dst.dev->mtu);
 
 	if (!inetdev_valid_mtu(cork->fragsize))
 		return -ENETUNREACH;
@@ -1437,7 +1437,7 @@ struct sk_buff *__ip_make_skb(struct sock *sk,
 	pmtudisc = READ_ONCE(inet->pmtudisc);
 	if (pmtudisc == IP_PMTUDISC_DO ||
 	    pmtudisc == IP_PMTUDISC_PROBE ||
-	    (skb->len <= dst_mtu(&rt->dst) &&
+	    (skb->len <= dst4_mtu(&rt->dst) &&
 	     ip_dont_fragment(sk, &rt->dst)))
 		df = htons(IP_DF);
 
@@ -1604,7 +1604,8 @@ void ip_send_unicast_reply(struct sock *sk, const struct sock *orig_sk,
 			   const struct ip_reply_arg *arg,
 			   unsigned int len, u64 transmit_time, u32 txhash)
 {
-	struct ip_options_data replyopts;
+	DEFINE_RAW_FLEX(struct ip_options_rcu, replyopts, opt.__data,
+			IP_OPTIONS_DATA_FIXED_SIZE);
 	struct ipcm_cookie ipc;
 	struct flowi4 fl4;
 	struct rtable *rt = skb_rtable(skb);
@@ -1613,18 +1614,18 @@ void ip_send_unicast_reply(struct sock *sk, const struct sock *orig_sk,
 	int err;
 	int oif;
 
-	if (__ip_options_echo(net, &replyopts.opt.opt, skb, sopt))
+	if (__ip_options_echo(net, &replyopts->opt, skb, sopt))
 		return;
 
 	ipcm_init(&ipc);
 	ipc.addr = daddr;
 	ipc.sockc.transmit_time = transmit_time;
 
-	if (replyopts.opt.opt.optlen) {
-		ipc.opt = &replyopts.opt;
+	if (replyopts->opt.optlen) {
+		ipc.opt = replyopts;
 
-		if (replyopts.opt.opt.srr)
-			daddr = replyopts.opt.opt.faddr;
+		if (replyopts->opt.srr)
+			daddr = replyopts->opt.faddr;
 	}
 
 	oif = arg->bound_dev_if;
@@ -1664,8 +1665,10 @@ void ip_send_unicast_reply(struct sock *sk, const struct sock *orig_sk,
 			  arg->csumoffset) = csum_fold(csum_add(nskb->csum,
 								arg->csum));
 		nskb->ip_summed = CHECKSUM_NONE;
-		if (orig_sk)
+		if (orig_sk) {
 			skb_set_owner_edemux(nskb, (struct sock *)orig_sk);
+			psp_reply_set_decrypted(orig_sk, nskb);
+		}
 		if (transmit_time)
 			nskb->tstamp_type = SKB_CLOCK_MONOTONIC;
 		if (txhash)
