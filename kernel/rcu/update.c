@@ -117,7 +117,7 @@ static bool rcu_read_lock_held_common(bool *ret)
 	return false;
 }
 
-int rcu_read_lock_sched_held(void)
+int notrace rcu_read_lock_sched_held(void)
 {
 	bool ret;
 
@@ -342,7 +342,7 @@ EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
  * Note that rcu_read_lock() is disallowed if the CPU is either idle or
  * offline from an RCU perspective, so check for those as well.
  */
-int rcu_read_lock_held(void)
+int notrace rcu_read_lock_held(void)
 {
 	bool ret;
 
@@ -367,7 +367,7 @@ EXPORT_SYMBOL_GPL(rcu_read_lock_held);
  * Note that rcu_read_lock_bh() is disallowed if the CPU is either idle or
  * offline from an RCU perspective, so check for those as well.
  */
-int rcu_read_lock_bh_held(void)
+int notrace rcu_read_lock_bh_held(void)
 {
 	bool ret;
 
@@ -377,7 +377,7 @@ int rcu_read_lock_bh_held(void)
 }
 EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
 
-int rcu_read_lock_any_held(void)
+int notrace rcu_read_lock_any_held(void)
 {
 	bool ret;
 
@@ -409,7 +409,7 @@ void wakeme_after_rcu(struct rcu_head *head)
 EXPORT_SYMBOL_GPL(wakeme_after_rcu);
 
 void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *crcu_array,
-		   struct rcu_synchronize *rs_array)
+		   struct rcu_synchronize *rs_array, struct dept_key *dkey)
 {
 	int i;
 	int j;
@@ -426,7 +426,8 @@ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *c
 				break;
 		if (j == i) {
 			init_rcu_head_on_stack(&rs_array[i].head);
-			init_completion(&rs_array[i].completion);
+			sdt_map_init_key(&rs_array[i].dmap, dkey);
+			init_completion_dmap(&rs_array[i].completion, &rs_array[i].dmap);
 			(crcu_array[i])(&rs_array[i].head, wakeme_after_rcu);
 		}
 	}
@@ -538,6 +539,28 @@ long torture_sched_setaffinity(pid_t pid, const struct cpumask *in_mask, bool do
 EXPORT_SYMBOL_GPL(torture_sched_setaffinity);
 #endif
 
+#if IS_ENABLED(CONFIG_TRIVIAL_PREEMPT_RCU)
+// Trivial and stupid grace-period wait.  Defined here so that lockdep
+// kernels can find tasklist_lock.
+void synchronize_rcu_trivial_preempt(void)
+{
+	struct task_struct *g;
+	struct task_struct *t;
+
+	smp_mb(); // Order prior accesses before grace-period start.
+	rcu_read_lock(); // Protect task list.
+	for_each_process_thread(g, t) {
+		if (t == current)
+			continue;  // Don't deadlock on ourselves!
+		// Order later rcu_read_lock() on other tasks after QS.
+		while (smp_load_acquire(&t->rcu_trivial_preempt_nesting))
+			continue;
+	}
+	rcu_read_unlock();
+}
+EXPORT_SYMBOL_GPL(synchronize_rcu_trivial_preempt);
+#endif // #if IS_ENABLED(CONFIG_TRIVIAL_PREEMPT_RCU)
+
 int rcu_cpu_stall_notifiers __read_mostly; // !0 = provide stall notifiers (rarely useful)
 EXPORT_SYMBOL_GPL(rcu_cpu_stall_notifiers);
 
@@ -614,7 +637,7 @@ static void early_boot_test_call_rcu(void)
 	call_rcu(&head, test_callback);
 	early_srcu_cookie = start_poll_synchronize_srcu(&early_srcu);
 	call_srcu(&early_srcu, &shead, test_callback);
-	rhp = kmalloc(sizeof(*rhp), GFP_KERNEL);
+	rhp = kmalloc_obj(*rhp);
 	if (!WARN_ON_ONCE(!rhp))
 		kfree_rcu(rhp, rh);
 }

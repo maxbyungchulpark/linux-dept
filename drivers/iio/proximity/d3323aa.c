@@ -13,7 +13,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -722,8 +721,7 @@ static int d3323aa_probe(struct platform_device *pdev)
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
 	if (!indio_dev)
-		return dev_err_probe(dev, -ENOMEM,
-				     "Could not allocate iio device\n");
+		return -ENOMEM;
 
 	data = iio_priv(indio_dev);
 	data->dev = dev;

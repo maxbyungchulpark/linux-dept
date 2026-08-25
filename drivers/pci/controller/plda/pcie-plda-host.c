@@ -599,8 +599,7 @@ int plda_pcie_host_init(struct plda_pcie_rp *port, struct pci_ops *ops,
 
 	bridge = devm_pci_alloc_host_bridge(dev, 0);
 	if (!bridge)
-		return dev_err_probe(dev, -ENOMEM,
-				     "failed to alloc bridge\n");
+		return -ENOMEM;
 
 	if (port->host_ops && port->host_ops->host_init) {
 		ret = port->host_ops->host_init(port);
@@ -641,8 +640,10 @@ EXPORT_SYMBOL_GPL(plda_pcie_host_init);
 
 void plda_pcie_host_deinit(struct plda_pcie_rp *port)
 {
+	pci_lock_rescan_remove();
 	pci_stop_root_bus(port->bridge->bus);
 	pci_remove_root_bus(port->bridge->bus);
+	pci_unlock_rescan_remove();
 
 	plda_pcie_irq_domain_deinit(port);
 

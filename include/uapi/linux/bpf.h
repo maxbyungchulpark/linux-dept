@@ -119,6 +119,14 @@ enum bpf_cgroup_iter_order {
 	BPF_CGROUP_ITER_DESCENDANTS_PRE,	/* walk descendants in pre-order. */
 	BPF_CGROUP_ITER_DESCENDANTS_POST,	/* walk descendants in post-order. */
 	BPF_CGROUP_ITER_ANCESTORS_UP,		/* walk ancestors upward. */
+	/*
+	 * Walks the immediate children of the specified parent
+	 * cgroup_subsys_state. Unlike BPF_CGROUP_ITER_DESCENDANTS_PRE,
+	 * BPF_CGROUP_ITER_DESCENDANTS_POST, and BPF_CGROUP_ITER_ANCESTORS_UP
+	 * the iterator does not include the specified parent as one of the
+	 * returned iterator elements.
+	 */
+	BPF_CGROUP_ITER_CHILDREN,
 };
 
 union bpf_iter_link_info {
@@ -918,6 +926,16 @@ union bpf_iter_link_info {
  *		Number of bytes read from the stream on success, or -1 if an
  *		error occurred (in which case, *errno* is set appropriately).
  *
+ * BPF_PROG_ASSOC_STRUCT_OPS
+ * 	Description
+ * 		Associate a BPF program with a struct_ops map. The struct_ops
+ * 		map is identified by *map_fd* and the BPF program is
+ * 		identified by *prog_fd*.
+ *
+ * 	Return
+ * 		0 on success or -1 if an error occurred (in which case,
+ * 		*errno* is set appropriately).
+ *
  * NOTES
  *	eBPF objects (maps and programs) can be shared between processes.
  *
@@ -974,7 +992,9 @@ enum bpf_cmd {
 	BPF_PROG_BIND_MAP,
 	BPF_TOKEN_CREATE,
 	BPF_PROG_STREAM_READ_BY_FD,
+	BPF_PROG_ASSOC_STRUCT_OPS,
 	__MAX_BPF_CMD,
+	BPF_COMMON_ATTRS = 1 << 16, /* Indicate carrying syscall common attrs. */
 };
 
 enum bpf_map_type {
@@ -1026,6 +1046,8 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_USER_RINGBUF,
 	BPF_MAP_TYPE_CGRP_STORAGE,
 	BPF_MAP_TYPE_ARENA,
+	BPF_MAP_TYPE_INSN_ARRAY,
+	BPF_MAP_TYPE_RHASH,
 	__MAX_BPF_MAP_TYPE
 };
 
@@ -1133,6 +1155,10 @@ enum bpf_attach_type {
 	BPF_NETKIT_PEER,
 	BPF_TRACE_KPROBE_SESSION,
 	BPF_TRACE_UPROBE_SESSION,
+	BPF_TRACE_FSESSION,
+	BPF_TRACE_FENTRY_MULTI,
+	BPF_TRACE_FEXIT_MULTI,
+	BPF_TRACE_FSESSION_MULTI,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1157,6 +1183,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_UPROBE_MULTI = 12,
 	BPF_LINK_TYPE_NETKIT = 13,
 	BPF_LINK_TYPE_SOCKMAP = 14,
+	BPF_LINK_TYPE_TRACING_MULTI = 15,
 	__MAX_BPF_LINK_TYPE,
 };
 
@@ -1300,7 +1327,11 @@ enum {
  * BPF_TRACE_UPROBE_MULTI attach type to create return probe.
  */
 enum {
-	BPF_F_UPROBE_MULTI_RETURN = (1U << 0)
+	/* Get return uprobe. */
+	BPF_F_UPROBE_MULTI_RETURN     = (1U << 0),
+
+	/* Get path from provided path_fd. */
+	BPF_F_UPROBE_MULTI_PATH_FD    = (1U << 1),
 };
 
 /* link_create.netfilter.flags used in LINK_CREATE command for
@@ -1372,6 +1403,8 @@ enum {
 	BPF_NOEXIST	= 1, /* create new element if it didn't exist */
 	BPF_EXIST	= 2, /* update existing element */
 	BPF_F_LOCK	= 4, /* spin_lock-ed map_lookup/map_update */
+	BPF_F_CPU	= 8, /* cpu flag for percpu maps, upper 32-bit of flags is a cpu number */
+	BPF_F_ALL_CPUS	= 16, /* update value across all CPUs for percpu maps */
 };
 
 /* flags for BPF_MAP_CREATE command */
@@ -1430,6 +1463,9 @@ enum {
 
 /* Do not translate kernel bpf_arena pointers to user pointers */
 	BPF_F_NO_USER_CONV	= (1U << 18),
+
+/* Enable BPF ringbuf overwrite mode */
+	BPF_F_RB_OVERWRITE	= (1U << 19),
 };
 
 /* Flags for BPF_PROG_QUERY. */
@@ -1474,6 +1510,13 @@ struct bpf_stack_build_id {
 	};
 };
 
+struct bpf_common_attr {
+	__aligned_u64 log_buf;
+	__u32 log_size;
+	__u32 log_level;
+	__u32 log_true_size;
+};
+
 #define BPF_OBJ_NAME_LEN 16U
 
 enum {
@@ -1511,6 +1554,11 @@ union bpf_attr {
 		 *
 		 * BPF_MAP_TYPE_ARENA - contains the address where user space
 		 * is going to mmap() the arena. It has to be page aligned.
+		 *
+		 * BPF_MAP_TYPE_RHASH - initial table size hint
+		 * (nelem_hint). 0 = use rhashtable default. Must be
+		 * <= min(max_entries, U16_MAX). Upper 32 bits reserved,
+		 * must be zero.
 		 */
 		__u64	map_extra;
 
@@ -1522,6 +1570,12 @@ union bpf_attr {
 		 * If provided, map_flags should have BPF_F_TOKEN_FD flag set.
 		 */
 		__s32	map_token_fd;
+
+		/* Hash of the program that has exclusive access to the map.
+		 */
+		__aligned_u64 excl_prog_hash;
+		/* Size of the passed excl_prog_hash. */
+		__u32 excl_prog_hash_size;
 	};
 
 	struct { /* anonymous struct used by BPF_MAP_*_ELEM and BPF_MAP_FREEZE commands */
@@ -1605,6 +1659,16 @@ union bpf_attr {
 		 * continuous.
 		 */
 		__u32		fd_array_cnt;
+		/* Pointer to a buffer containing the signature of the BPF
+		 * program.
+		 */
+		__aligned_u64   signature;
+		/* Size of the signature buffer in bytes. */
+		__u32 		signature_size;
+		/* ID of the kernel keyring to be used for signature
+		 * verification.
+		 */
+		__s32		keyring_id;
 	};
 
 	struct { /* anonymous struct used by BPF_OBJ_* commands */
@@ -1804,6 +1868,7 @@ union bpf_attr {
 				__u32		cnt;
 				__u32		flags;
 				__u32		pid;
+				__u32		path_fd;
 			} uprobe_multi;
 			struct {
 				union {
@@ -1819,6 +1884,11 @@ union bpf_attr {
 				};
 				__u64		expected_revision;
 			} cgroup;
+			struct {
+				__aligned_u64	ids;
+				__aligned_u64	cookies;
+				__u32		cnt;
+			} tracing_multi;
 		};
 	} link_create;
 
@@ -1873,6 +1943,12 @@ union bpf_attr {
 		__u32		stream_id;
 		__u32		prog_fd;
 	} prog_stream_read;
+
+	struct {
+		__u32		map_fd;
+		__u32		prog_fd;
+		__u32		flags;
+	} prog_assoc_struct_ops;
 
 } __attribute__((aligned(8)));
 
@@ -4597,7 +4673,9 @@ union bpf_attr {
  * 	Description
  * 		Discard reserved ring buffer sample, pointed to by *data*.
  * 		If **BPF_RB_NO_WAKEUP** is specified in *flags*, no notification
- * 		of new data availability is sent.
+ * 		of new data availability is sent. Discarded records remain in
+ * 		the ring buffer until consumed by user space, so a later submit
+ * 		using adaptive wakeup might not wake up the consumer.
  * 		If **BPF_RB_FORCE_WAKEUP** is specified in *flags*, notification
  * 		of new data availability is sent unconditionally.
  * 		If **0** is specified in *flags*, an adaptive notification
@@ -4875,7 +4953,7 @@ union bpf_attr {
  *
  *		**-ENOENT** if the bpf_local_storage cannot be found.
  *
- * long bpf_d_path(struct path *path, char *buf, u32 sz)
+ * long bpf_d_path(const struct path *path, char *buf, u32 sz)
  *	Description
  *		Return full path for given **struct path** object, which
  *		needs to be the kernel BTF *path* object. The path is
@@ -5602,7 +5680,7 @@ union bpf_attr {
  *	Return
  *		*sk* if casting is valid, or **NULL** otherwise.
  *
- * long bpf_dynptr_from_mem(void *data, u32 size, u64 flags, struct bpf_dynptr *ptr)
+ * long bpf_dynptr_from_mem(void *data, u64 size, u64 flags, struct bpf_dynptr *ptr)
  *	Description
  *		Get a dynptr to local memory *data*.
  *
@@ -5645,7 +5723,7 @@ union bpf_attr {
  *	Return
  *		Nothing. Always succeeds.
  *
- * long bpf_dynptr_read(void *dst, u32 len, const struct bpf_dynptr *src, u32 offset, u64 flags)
+ * long bpf_dynptr_read(void *dst, u64 len, const struct bpf_dynptr *src, u64 offset, u64 flags)
  *	Description
  *		Read *len* bytes from *src* into *dst*, starting from *offset*
  *		into *src*.
@@ -5655,7 +5733,7 @@ union bpf_attr {
  *		of *src*'s data, -EINVAL if *src* is an invalid dynptr or if
  *		*flags* is not 0.
  *
- * long bpf_dynptr_write(const struct bpf_dynptr *dst, u32 offset, void *src, u32 len, u64 flags)
+ * long bpf_dynptr_write(const struct bpf_dynptr *dst, u64 offset, void *src, u64 len, u64 flags)
  *	Description
  *		Write *len* bytes from *src* into *dst*, starting from *offset*
  *		into *dst*.
@@ -5676,7 +5754,7 @@ union bpf_attr {
  *		is a read-only dynptr or if *flags* is not correct. For skb-type dynptrs,
  *		other errors correspond to errors returned by **bpf_skb_store_bytes**\ ().
  *
- * void *bpf_dynptr_data(const struct bpf_dynptr *ptr, u32 offset, u32 len)
+ * void *bpf_dynptr_data(const struct bpf_dynptr *ptr, u64 offset, u64 len)
  *	Description
  *		Get a pointer to the underlying dynptr data.
  *
@@ -6215,6 +6293,7 @@ enum {
 	BPF_RB_RING_SIZE = 1,
 	BPF_RB_CONS_POS = 2,
 	BPF_RB_PROD_POS = 3,
+	BPF_RB_OVERWRITE_POS = 4,
 };
 
 /* BPF ring buffer constants */
@@ -6647,6 +6726,7 @@ struct bpf_prog_info {
 	__u32 verified_insns;
 	__u32 attach_btf_obj_id;
 	__u32 attach_btf_id;
+	__u32 :32;
 } __attribute__((aligned(8)));
 
 struct bpf_map_info {
@@ -6666,6 +6746,9 @@ struct bpf_map_info {
 	__u32 btf_value_type_id;
 	__u32 btf_vmlinux_id;
 	__u64 map_extra;
+	__aligned_u64 hash;
+	__u32 hash_size;
+	__u32 :32;
 } __attribute__((aligned(8)));
 
 struct bpf_btf_info {
@@ -7182,6 +7265,8 @@ enum {
 	TCP_BPF_SYN_MAC         = 1007, /* Copy the MAC, IP[46], and TCP header */
 	TCP_BPF_SOCK_OPS_CB_FLAGS = 1008, /* Get or Set TCP sock ops flags */
 	SK_BPF_CB_FLAGS		= 1009, /* Get or set sock ops flags in socket */
+	SK_BPF_BYPASS_PROT_MEM	= 1010, /* Get or Set sk->sk_bypass_prot_mem */
+
 };
 
 enum {
@@ -7418,6 +7503,10 @@ struct bpf_timer {
 	__u64 __opaque[2];
 } __attribute__((aligned(8)));
 
+struct bpf_task_work {
+	__u64 __opaque;
+} __attribute__((aligned(8)));
+
 struct bpf_wq {
 	__u64 __opaque[2];
 } __attribute__((aligned(8)));
@@ -7621,6 +7710,26 @@ struct bpf_iter_num {
  */
 enum bpf_kfunc_flags {
 	BPF_F_PAD_ZEROS = (1ULL << 0),
+};
+
+/*
+ * Values of a BPF_MAP_TYPE_INSN_ARRAY entry must be of this type.
+ *
+ * Before the map is used the orig_off field should point to an
+ * instruction inside the program being loaded. The other fields
+ * must be set to 0.
+ *
+ * After the program is loaded, the xlated_off will be adjusted
+ * by the verifier to point to the index of the original instruction
+ * in the xlated program. If the instruction is deleted, it will
+ * be set to (u32)-1. The jitted_off will be set to the corresponding
+ * offset in the jitted image of the program.
+ */
+struct bpf_insn_array_value {
+	__u32 orig_off;
+	__u32 xlated_off;
+	__u32 jitted_off;
+	__u32 :32;
 };
 
 #endif /* _UAPI__LINUX_BPF_H__ */

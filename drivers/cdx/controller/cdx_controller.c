@@ -5,7 +5,6 @@
  * Copyright (C) 2022-2023, Advanced Micro Devices, Inc.
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/cdx/cdx_bus.h>
@@ -14,7 +13,7 @@
 #include "cdx_controller.h"
 #include "../cdx.h"
 #include "mcdi_functions.h"
-#include "mcdi.h"
+#include "mcdid.h"
 
 static unsigned int cdx_mcdi_rpc_timeout(struct cdx_mcdi *cdx, unsigned int cmd)
 {
@@ -168,7 +167,7 @@ static int xlnx_cdx_probe(struct platform_device *pdev)
 	struct cdx_mcdi *cdx_mcdi;
 	int ret;
 
-	cdx_mcdi = kzalloc(sizeof(*cdx_mcdi), GFP_KERNEL);
+	cdx_mcdi = kzalloc_obj(*cdx_mcdi);
 	if (!cdx_mcdi)
 		return -ENOMEM;
 
@@ -181,7 +180,7 @@ static int xlnx_cdx_probe(struct platform_device *pdev)
 		goto mcdi_init_fail;
 	}
 
-	cdx = kzalloc(sizeof(*cdx), GFP_KERNEL);
+	cdx = kzalloc_obj(*cdx);
 	if (!cdx) {
 		ret = -ENOMEM;
 		goto cdx_alloc_fail;
@@ -193,7 +192,8 @@ static int xlnx_cdx_probe(struct platform_device *pdev)
 	cdx->ops = &cdx_ops;
 
 	/* Create MSI domain */
-	cdx->msi_domain = cdx_msi_domain_init(&pdev->dev);
+	if (IS_ENABLED(CONFIG_GENERIC_MSI_IRQ))
+		cdx->msi_domain = cdx_msi_domain_init(&pdev->dev);
 	if (!cdx->msi_domain) {
 		ret = dev_err_probe(&pdev->dev, -ENODEV, "cdx_msi_domain_init() failed");
 		goto cdx_msi_fail;

@@ -40,6 +40,13 @@ static int display_connector_attach(struct drm_bridge *bridge,
 	return flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR ? 0 : -EINVAL;
 }
 
+static void display_connector_destroy(struct drm_bridge *bridge)
+{
+	struct display_connector *conn = to_display_connector(bridge);
+
+	i2c_put_adapter(conn->bridge.ddc);
+}
+
 static enum drm_connector_status display_connector_detect(struct drm_bridge *bridge)
 {
 	struct display_connector *conn = to_display_connector(bridge);
@@ -108,7 +115,7 @@ static u32 *display_connector_get_output_bus_fmts(struct drm_bridge *bridge,
 					struct drm_connector_state *conn_state,
 					unsigned int *num_output_fmts)
 {
-	struct drm_bridge *prev_bridge = drm_bridge_get_prev_bridge(bridge);
+	struct drm_bridge *prev_bridge __free(drm_bridge_put) = drm_bridge_get_prev_bridge(bridge);
 	struct drm_bridge_state *prev_bridge_state;
 
 	if (!prev_bridge || !prev_bridge->funcs->atomic_get_output_bus_fmts) {
@@ -116,7 +123,7 @@ static u32 *display_connector_get_output_bus_fmts(struct drm_bridge *bridge,
 		u32 *out_bus_fmts;
 
 		*num_output_fmts = 1;
-		out_bus_fmts = kmalloc(sizeof(*out_bus_fmts), GFP_KERNEL);
+		out_bus_fmts = kmalloc_obj(*out_bus_fmts);
 		if (!out_bus_fmts)
 			return NULL;
 
@@ -151,14 +158,14 @@ static u32 *display_connector_get_input_bus_fmts(struct drm_bridge *bridge,
 					u32 output_fmt,
 					unsigned int *num_input_fmts)
 {
-	struct drm_bridge *prev_bridge = drm_bridge_get_prev_bridge(bridge);
+	struct drm_bridge *prev_bridge __free(drm_bridge_put) = drm_bridge_get_prev_bridge(bridge);
 	struct drm_bridge_state *prev_bridge_state;
 
 	if (!prev_bridge || !prev_bridge->funcs->atomic_get_input_bus_fmts) {
 		u32 *in_bus_fmts;
 
 		*num_input_fmts = 1;
-		in_bus_fmts = kmalloc(sizeof(*in_bus_fmts), GFP_KERNEL);
+		in_bus_fmts = kmalloc_obj(*in_bus_fmts);
 		if (!in_bus_fmts)
 			return NULL;
 
@@ -177,6 +184,7 @@ static u32 *display_connector_get_input_bus_fmts(struct drm_bridge *bridge,
 
 static const struct drm_bridge_funcs display_connector_bridge_funcs = {
 	.attach = display_connector_attach,
+	.destroy = display_connector_destroy,
 	.detect = display_connector_bridge_detect,
 	.edid_read = display_connector_edid_read,
 	.atomic_get_output_bus_fmts = display_connector_get_output_bus_fmts,
@@ -373,7 +381,8 @@ static int display_connector_probe(struct platform_device *pdev)
 	if (conn->bridge.ddc)
 		conn->bridge.ops |= DRM_BRIDGE_OP_EDID
 				 |  DRM_BRIDGE_OP_DETECT;
-	if (conn->hpd_gpio)
+	/* Detecting the monitor requires reading DPCD */
+	if (conn->hpd_gpio && type != DRM_MODE_CONNECTOR_DisplayPort)
 		conn->bridge.ops |= DRM_BRIDGE_OP_DETECT;
 	if (conn->hpd_irq >= 0)
 		conn->bridge.ops |= DRM_BRIDGE_OP_HPD;
@@ -402,9 +411,6 @@ static void display_connector_remove(struct platform_device *pdev)
 		regulator_disable(conn->supply);
 
 	drm_bridge_remove(&conn->bridge);
-
-	if (!IS_ERR(conn->bridge.ddc))
-		i2c_put_adapter(conn->bridge.ddc);
 }
 
 static const struct of_device_id display_connector_match[] = {

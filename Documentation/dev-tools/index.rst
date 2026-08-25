@@ -21,7 +21,10 @@ Documentation/process/debugging/index.rst
    checkpatch
    clang-format
    coccinelle
+   context-analysis
    sparse
+   dept
+   dept_api
    kcov
    gcov
    kasan
@@ -29,6 +32,7 @@ Documentation/process/debugging/index.rst
    ubsan
    kmemleak
    kcsan
+   lkmm/index
    kfence
    kselftest
    kunit/index
@@ -37,11 +41,4 @@ Documentation/process/debugging/index.rst
    gpio-sloppy-logic-analyzer
    autofdo
    propeller
-
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   container

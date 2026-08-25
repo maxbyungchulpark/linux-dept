@@ -21,7 +21,7 @@
 #include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
-#include <linux/swapops.h>
+#include <linux/leafops.h>
 #include <linux/syscalls.h>
 #include <linux/mman.h>
 #include <linux/pagemap.h>
@@ -31,7 +31,7 @@
 #include <linux/hash.h>
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
-#include <linux/pagevec.h>
+#include <linux/folio_batch.h>
 #include <linux/security.h>
 #include <linux/cpuset.h>
 #include <linux/hugetlb.h>
@@ -48,7 +48,9 @@
 #include <linux/rcupdate_wait.h>
 #include <linux/sched/mm.h>
 #include <linux/sysctl.h>
-#include <asm/pgalloc.h>
+#include <linux/pgalloc.h>
+#include <linux/dept.h>
+
 #include <asm/tlbflush.h>
 #include "internal.h"
 
@@ -181,15 +183,17 @@ static void filemap_unaccount_folio(struct address_space *mapping,
 
 	nr = folio_nr_pages(folio);
 
-	__lruvec_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
+	lruvec_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
 	if (folio_test_swapbacked(folio)) {
-		__lruvec_stat_mod_folio(folio, NR_SHMEM, -nr);
+		lruvec_stat_mod_folio(folio, NR_SHMEM, -nr);
 		if (folio_test_pmd_mappable(folio))
-			__lruvec_stat_mod_folio(folio, NR_SHMEM_THPS, -nr);
+			lruvec_stat_mod_folio(folio, NR_SHMEM_THPS, -nr);
 	} else if (folio_test_pmd_mappable(folio)) {
-		__lruvec_stat_mod_folio(folio, NR_FILE_THPS, -nr);
-		filemap_nr_thps_dec(mapping);
+		lruvec_stat_mod_folio(folio, NR_FILE_THPS, -nr);
 	}
+	if (test_bit(AS_KERNEL_FILE, &folio->mapping->flags))
+		mod_node_page_state(folio_pgdat(folio),
+				    NR_KERNEL_FILE_PAGES, -nr);
 
 	/*
 	 * At this point folio must be either written or cleaned by
@@ -224,7 +228,8 @@ void __filemap_remove_folio(struct folio *folio, void *shadow)
 	page_cache_delete(mapping, folio, shadow);
 }
 
-void filemap_free_folio(struct address_space *mapping, struct folio *folio)
+static void filemap_free_folio(const struct address_space *mapping,
+		struct folio *folio)
 {
 	void (*free_folio)(struct folio *);
 
@@ -253,7 +258,7 @@ void filemap_remove_folio(struct folio *folio)
 	__filemap_remove_folio(folio, NULL);
 	xa_unlock_irq(&mapping->i_pages);
 	if (mapping_shrinkable(mapping))
-		inode_add_lru(mapping->host);
+		inode_lru_list_add(mapping->host);
 	spin_unlock(&mapping->host->i_lock);
 
 	filemap_free_folio(mapping, folio);
@@ -332,7 +337,7 @@ void delete_from_page_cache_batch(struct address_space *mapping,
 	page_cache_delete_batch(mapping, fbatch);
 	xa_unlock_irq(&mapping->i_pages);
 	if (mapping_shrinkable(mapping))
-		inode_add_lru(mapping->host);
+		inode_lru_list_add(mapping->host);
 	spin_unlock(&mapping->host->i_lock);
 
 	for (i = 0; i < folio_batch_count(fbatch); i++)
@@ -363,83 +368,60 @@ static int filemap_check_and_keep_errors(struct address_space *mapping)
 	return 0;
 }
 
-/**
- * filemap_fdatawrite_wbc - start writeback on mapping dirty pages in range
- * @mapping:	address space structure to write
- * @wbc:	the writeback_control controlling the writeout
- *
- * Call writepages on the mapping using the provided wbc to control the
- * writeout.
- *
- * Return: %0 on success, negative error code otherwise.
- */
-int filemap_fdatawrite_wbc(struct address_space *mapping,
-			   struct writeback_control *wbc)
+static int filemap_writeback(struct address_space *mapping, loff_t start,
+		loff_t end, enum writeback_sync_modes sync_mode,
+		long *nr_to_write)
 {
+	struct writeback_control wbc = {
+		.sync_mode	= sync_mode,
+		.nr_to_write	= nr_to_write ? *nr_to_write : LONG_MAX,
+		.range_start	= start,
+		.range_end	= end,
+	};
 	int ret;
 
 	if (!mapping_can_writeback(mapping) ||
 	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		return 0;
 
-	wbc_attach_fdatawrite_inode(wbc, mapping->host);
-	ret = do_writepages(mapping, wbc);
-	wbc_detach_inode(wbc);
+	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
+	ret = do_writepages(mapping, &wbc);
+	wbc_detach_inode(&wbc);
+
+	if (!ret && nr_to_write)
+		*nr_to_write = wbc.nr_to_write;
 	return ret;
 }
-EXPORT_SYMBOL(filemap_fdatawrite_wbc);
 
 /**
- * __filemap_fdatawrite_range - start writeback on mapping dirty pages in range
+ * filemap_fdatawrite_range - start writeback on mapping dirty pages in range
  * @mapping:	address space structure to write
  * @start:	offset in bytes where the range starts
  * @end:	offset in bytes where the range ends (inclusive)
- * @sync_mode:	enable synchronous operation
  *
  * Start writeback against all of a mapping's dirty pages that lie
  * within the byte offsets <start, end> inclusive.
  *
- * If sync_mode is WB_SYNC_ALL then this is a "data integrity" operation, as
- * opposed to a regular memory cleansing writeback.  The difference between
- * these two operations is that if a dirty page/buffer is encountered, it must
- * be waited upon, and not just skipped over.
+ * This is a data integrity operation that waits upon dirty or in writeback
+ * pages.
  *
  * Return: %0 on success, negative error code otherwise.
  */
-int __filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
-				loff_t end, int sync_mode)
-{
-	struct writeback_control wbc = {
-		.sync_mode = sync_mode,
-		.nr_to_write = LONG_MAX,
-		.range_start = start,
-		.range_end = end,
-	};
-
-	return filemap_fdatawrite_wbc(mapping, &wbc);
-}
-
-static inline int __filemap_fdatawrite(struct address_space *mapping,
-	int sync_mode)
-{
-	return __filemap_fdatawrite_range(mapping, 0, LLONG_MAX, sync_mode);
-}
-
-int filemap_fdatawrite(struct address_space *mapping)
-{
-	return __filemap_fdatawrite(mapping, WB_SYNC_ALL);
-}
-EXPORT_SYMBOL(filemap_fdatawrite);
-
 int filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
-				loff_t end)
+		loff_t end)
 {
-	return __filemap_fdatawrite_range(mapping, start, end, WB_SYNC_ALL);
+	return filemap_writeback(mapping, start, end, WB_SYNC_ALL, NULL);
 }
 EXPORT_SYMBOL(filemap_fdatawrite_range);
 
+int filemap_fdatawrite(struct address_space *mapping)
+{
+	return filemap_fdatawrite_range(mapping, 0, LLONG_MAX);
+}
+EXPORT_SYMBOL(filemap_fdatawrite);
+
 /**
- * filemap_fdatawrite_range_kick - start writeback on a range
+ * filemap_flush_range - start writeback on a range
  * @mapping:	target address_space
  * @start:	index to start writeback on
  * @end:	last (inclusive) index for writeback
@@ -449,12 +431,12 @@ EXPORT_SYMBOL(filemap_fdatawrite_range);
  *
  * Return: %0 on success, negative error code otherwise.
  */
-int filemap_fdatawrite_range_kick(struct address_space *mapping, loff_t start,
+int filemap_flush_range(struct address_space *mapping, loff_t start,
 				  loff_t end)
 {
-	return __filemap_fdatawrite_range(mapping, start, end, WB_SYNC_NONE);
+	return filemap_writeback(mapping, start, end, WB_SYNC_NONE, NULL);
 }
-EXPORT_SYMBOL_GPL(filemap_fdatawrite_range_kick);
+EXPORT_SYMBOL_GPL(filemap_flush_range);
 
 /**
  * filemap_flush - mostly a non-blocking flush
@@ -467,9 +449,21 @@ EXPORT_SYMBOL_GPL(filemap_fdatawrite_range_kick);
  */
 int filemap_flush(struct address_space *mapping)
 {
-	return __filemap_fdatawrite(mapping, WB_SYNC_NONE);
+	return filemap_flush_range(mapping, 0, LLONG_MAX);
 }
 EXPORT_SYMBOL(filemap_flush);
+
+/*
+ * Start writeback on @nr_to_write pages from @mapping.  No one but the existing
+ * btrfs caller should be using this.  Talk to linux-mm if you think adding a
+ * new caller is a good idea.
+ */
+int filemap_flush_nr(struct address_space *mapping, long *nr_to_write)
+{
+	return filemap_writeback(mapping, 0, LLONG_MAX, WB_SYNC_NONE,
+			nr_to_write);
+}
+EXPORT_SYMBOL_FOR_MODULES(filemap_flush_nr, "btrfs");
 
 /**
  * filemap_range_has_page - check if a page exists in range.
@@ -688,8 +682,7 @@ int filemap_write_and_wait_range(struct address_space *mapping,
 		return 0;
 
 	if (mapping_needs_writeback(mapping)) {
-		err = __filemap_fdatawrite_range(mapping, lstart, lend,
-						 WB_SYNC_ALL);
+		err = filemap_fdatawrite_range(mapping, lstart, lend);
 		/*
 		 * Even if the above returned error, the pages may be
 		 * written partially (e.g. -ENOSPC), so we wait for it.
@@ -791,8 +784,7 @@ int file_write_and_wait_range(struct file *file, loff_t lstart, loff_t lend)
 		return 0;
 
 	if (mapping_needs_writeback(mapping)) {
-		err = __filemap_fdatawrite_range(mapping, lstart, lend,
-						 WB_SYNC_ALL);
+		err = filemap_fdatawrite_range(mapping, lstart, lend);
 		/* See comment of filemap_write_and_wait() */
 		if (err != -EIO)
 			__filemap_fdatawait_range(mapping, lstart, lend);
@@ -840,13 +832,13 @@ void replace_page_cache_folio(struct folio *old, struct folio *new)
 	old->mapping = NULL;
 	/* hugetlb pages do not participate in page cache accounting. */
 	if (!folio_test_hugetlb(old))
-		__lruvec_stat_sub_folio(old, NR_FILE_PAGES);
+		lruvec_stat_sub_folio(old, NR_FILE_PAGES);
 	if (!folio_test_hugetlb(new))
-		__lruvec_stat_add_folio(new, NR_FILE_PAGES);
+		lruvec_stat_add_folio(new, NR_FILE_PAGES);
 	if (folio_test_swapbacked(old))
-		__lruvec_stat_sub_folio(old, NR_SHMEM);
+		lruvec_stat_sub_folio(old, NR_SHMEM);
 	if (folio_test_swapbacked(new))
-		__lruvec_stat_add_folio(new, NR_SHMEM);
+		lruvec_stat_add_folio(new, NR_SHMEM);
 	xas_unlock_irq(&xas);
 	if (free_folio)
 		free_folio(old);
@@ -929,9 +921,9 @@ noinline int __filemap_add_folio(struct address_space *mapping,
 
 		/* hugetlb pages do not participate in page cache accounting */
 		if (!huge) {
-			__lruvec_stat_mod_folio(folio, NR_FILE_PAGES, nr);
+			lruvec_stat_mod_folio(folio, NR_FILE_PAGES, nr);
 			if (folio_test_pmd_mappable(folio))
-				__lruvec_stat_mod_folio(folio,
+				lruvec_stat_mod_folio(folio,
 						NR_FILE_THPS, nr);
 		}
 
@@ -940,6 +932,12 @@ unlock:
 
 		if (!xas_nomem(&xas, gfp))
 			break;
+
+		/*
+		 * Lock has been dropped: start again with the original index
+		 * and order (but now with the memory reserved by xas_nomem()).
+		 */
+		xas_set_order(&xas, index, forder);
 	}
 
 	if (xas_error(&xas))
@@ -960,8 +958,14 @@ int filemap_add_folio(struct address_space *mapping, struct folio *folio,
 {
 	void *shadow = NULL;
 	int ret;
+	struct mem_cgroup *tmp;
+	bool kernel_file = test_bit(AS_KERNEL_FILE, &mapping->flags);
 
+	if (kernel_file)
+		tmp = set_active_memcg(root_mem_cgroup);
 	ret = mem_cgroup_charge(folio, NULL, gfp);
+	if (kernel_file)
+		set_active_memcg(tmp);
 	if (ret)
 		return ret;
 
@@ -983,16 +987,25 @@ int filemap_add_folio(struct address_space *mapping, struct folio *folio,
 		if (!(gfp & __GFP_WRITE) && shadow)
 			workingset_refault(folio, shadow);
 		folio_add_lru(folio);
+		if (kernel_file)
+			mod_node_page_state(folio_pgdat(folio),
+					    NR_KERNEL_FILE_PAGES,
+					    folio_nr_pages(folio));
 	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(filemap_add_folio);
 
 #ifdef CONFIG_NUMA
-struct folio *filemap_alloc_folio_noprof(gfp_t gfp, unsigned int order)
+struct folio *filemap_alloc_folio_noprof(gfp_t gfp, unsigned int order,
+		struct mempolicy *policy)
 {
 	int n;
 	struct folio *folio;
+
+	if (policy)
+		return folio_alloc_mpol_noprof(gfp, order, policy,
+				NO_INTERLEAVE_INDEX, numa_node_id());
 
 	if (cpuset_do_page_mem_spread()) {
 		unsigned int cpuset_mems_cookie;
@@ -1140,11 +1153,12 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	flags = wait->flags;
 	if (flags & WQ_FLAG_EXCLUSIVE) {
-		if (test_bit(key->bit_nr, &key->folio->flags))
+		if (test_bit(key->bit_nr, &key->folio->flags.f))
 			return -1;
 		if (flags & WQ_FLAG_CUSTOM) {
-			if (test_and_set_bit(key->bit_nr, &key->folio->flags))
+			if (test_and_set_bit(key->bit_nr, &key->folio->flags.f))
 				return -1;
+			dept_page_set_bit(&key->folio->page, key->bit_nr);
 			flags |= WQ_FLAG_DONE;
 		}
 	}
@@ -1184,6 +1198,13 @@ static void folio_wake_bit(struct folio *folio, int bit_nr)
 	key.folio = folio;
 	key.bit_nr = bit_nr;
 	key.page_match = 0;
+
+	/*
+	 * dept_page_clear_bit() being called multiple times is harmless.
+	 * The worst case is to miss some dependencies but it's okay.
+	 */
+	if (bit_nr == PG_locked || bit_nr == PG_writeback)
+		dept_page_clear_bit(&folio->page, bit_nr);
 
 	spin_lock_irqsave(&q->lock, flags);
 	__wake_up_locked_key(q, TASK_NORMAL, &key);
@@ -1226,14 +1247,21 @@ static inline bool folio_trylock_flag(struct folio *folio, int bit_nr,
 					struct wait_queue_entry *wait)
 {
 	if (wait->flags & WQ_FLAG_EXCLUSIVE) {
-		if (test_and_set_bit(bit_nr, &folio->flags))
+		if (test_and_set_bit(bit_nr, &folio->flags.f))
 			return false;
-	} else if (test_bit(bit_nr, &folio->flags))
+		dept_page_set_bit(&folio->page, bit_nr);
+	} else if (test_bit(bit_nr, &folio->flags.f))
 		return false;
 
 	wait->flags |= WQ_FLAG_WOKEN | WQ_FLAG_DONE;
 	return true;
 }
+
+struct dept_map __maybe_unused pg_locked_map = DEPT_MAP_INITIALIZER(pg_locked_map, NULL);
+EXPORT_SYMBOL(pg_locked_map);
+
+struct dept_map __maybe_unused pg_writeback_map = DEPT_MAP_INITIALIZER(pg_writeback_map, NULL);
+EXPORT_SYMBOL(pg_writeback_map);
 
 static inline int folio_wait_bit_common(struct folio *folio, int bit_nr,
 		int state, enum behavior behavior)
@@ -1245,6 +1273,8 @@ static inline int folio_wait_bit_common(struct folio *folio, int bit_nr,
 	bool thrashing = false;
 	unsigned long pflags;
 	bool in_thrashing;
+
+	dept_page_wait_on_bit(&folio->page, bit_nr);
 
 	if (bit_nr == PG_locked &&
 	    !folio_test_uptodate(folio) && folio_test_workingset(folio)) {
@@ -1340,6 +1370,23 @@ repeat:
 	}
 
 	/*
+	 * dept_page_set_bit() might have been called already in
+	 * folio_trylock_flag(), wake_page_function() or somewhere.
+	 * However, call it again to reset the wgen of dept to ensure
+	 * dept_page_wait_on_bit() is called prior to
+	 * dept_page_set_bit().
+	 *
+	 * Remind dept considers all the waits between
+	 * dept_page_set_bit() and dept_page_clear_bit() as potential
+	 * event disturbers. Ensure the correct sequence so that dept
+	 * can make correct decisions:
+	 *
+	 *	wait -> acquire(set bit) -> release(clear bit)
+	 */
+	if (wait->flags & WQ_FLAG_DONE)
+		dept_page_set_bit(&folio->page, bit_nr);
+
+	/*
 	 * If a signal happened, this 'finish_wait()' may remove the last
 	 * waiter from the wait-queues, but the folio waiters bit will remain
 	 * set. That's ok. The next wakeup will take care of it, and trying
@@ -1373,14 +1420,16 @@ repeat:
 
 #ifdef CONFIG_MIGRATION
 /**
- * migration_entry_wait_on_locked - Wait for a migration entry to be removed
- * @entry: migration swap entry.
+ * softleaf_entry_wait_on_locked - Wait for a migration entry or
+ * device_private entry to be removed.
+ * @entry: migration or device_private swap entry.
  * @ptl: already locked ptl. This function will drop the lock.
  *
- * Wait for a migration entry referencing the given page to be removed. This is
+ * Wait for a migration entry referencing the given page, or device_private
+ * entry referencing a dvice_private page to be unlocked. This is
  * equivalent to folio_put_wait_locked(folio, TASK_UNINTERRUPTIBLE) except
  * this can be called without taking a reference on the page. Instead this
- * should be called while holding the ptl for the migration entry referencing
+ * should be called while holding the ptl for @entry referencing
  * the page.
  *
  * Returns after unlocking the ptl.
@@ -1388,7 +1437,7 @@ repeat:
  * This follows the same logic as folio_wait_bit_common() so see the comments
  * there.
  */
-void migration_entry_wait_on_locked(swp_entry_t entry, spinlock_t *ptl)
+void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *ptl)
 	__releases(ptl)
 {
 	struct wait_page_queue wait_page;
@@ -1397,7 +1446,7 @@ void migration_entry_wait_on_locked(swp_entry_t entry, spinlock_t *ptl)
 	unsigned long pflags;
 	bool in_thrashing;
 	wait_queue_head_t *q;
-	struct folio *folio = pfn_swap_entry_folio(entry);
+	struct folio *folio = softleaf_to_folio(entry);
 
 	q = folio_waitqueue(folio);
 	if (!folio_test_uptodate(folio) && folio_test_workingset(folio)) {
@@ -1422,6 +1471,9 @@ void migration_entry_wait_on_locked(swp_entry_t entry, spinlock_t *ptl)
 	 * If a migration entry exists for the page the migration path must hold
 	 * a valid reference to the page, and it must take the ptl to remove the
 	 * migration entry. So the page is valid until the ptl is dropped.
+	 * Similarly any path attempting to drop the last reference to a
+	 * device-private page needs to grab the ptl to remove the device-private
+	 * entry.
 	 */
 	spin_unlock(ptl);
 
@@ -1496,6 +1548,7 @@ void folio_unlock(struct folio *folio)
 	BUILD_BUG_ON(PG_waiters != 7);
 	BUILD_BUG_ON(PG_locked > 7);
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	dept_page_clear_bit(&folio->page, PG_locked);
 	if (folio_xor_flags_has_waiters(folio, 1 << PG_locked))
 		folio_wake_bit(folio, PG_locked);
 }
@@ -1526,6 +1579,7 @@ void folio_end_read(struct folio *folio, bool success)
 
 	if (likely(success))
 		mask |= 1 << PG_uptodate;
+	dept_page_clear_bit(&folio->page, PG_locked);
 	if (folio_xor_flags_has_waiters(folio, mask))
 		folio_wake_bit(folio, PG_locked);
 }
@@ -1608,7 +1662,7 @@ static void filemap_end_dropbehind(struct folio *folio)
  * completes. Do that now. If we fail, it's likely because of a big folio -
  * just reset dropbehind for that case and latter completions should invalidate.
  */
-static void filemap_end_dropbehind_write(struct folio *folio)
+void folio_end_dropbehind(struct folio *folio)
 {
 	if (!folio_test_dropbehind(folio))
 		return;
@@ -1625,16 +1679,18 @@ static void filemap_end_dropbehind_write(struct folio *folio)
 		folio_unlock(folio);
 	}
 }
+EXPORT_SYMBOL_GPL(folio_end_dropbehind);
 
 /**
- * folio_end_writeback - End writeback against a folio.
+ * folio_end_writeback_no_dropbehind - End writeback against a folio.
  * @folio: The folio.
  *
  * The folio must actually be under writeback.
+ * This call is intended for filesystems that need to defer dropbehind.
  *
  * Context: May be called from process or interrupt context.
  */
-void folio_end_writeback(struct folio *folio)
+void folio_end_writeback_no_dropbehind(struct folio *folio)
 {
 	VM_BUG_ON_FOLIO(!folio_test_writeback(folio), folio);
 
@@ -1650,6 +1706,26 @@ void folio_end_writeback(struct folio *folio)
 		folio_rotate_reclaimable(folio);
 	}
 
+	dept_page_clear_bit(&folio->page, PG_writeback);
+	if (__folio_end_writeback(folio))
+		folio_wake_bit(folio, PG_writeback);
+
+	acct_reclaim_writeback(folio);
+}
+EXPORT_SYMBOL_GPL(folio_end_writeback_no_dropbehind);
+
+/**
+ * folio_end_writeback - End writeback against a folio.
+ * @folio: The folio.
+ *
+ * The folio must actually be under writeback.
+ *
+ * Context: May be called from process or interrupt context.
+ */
+void folio_end_writeback(struct folio *folio)
+{
+	VM_BUG_ON_FOLIO(!folio_test_writeback(folio), folio);
+
 	/*
 	 * Writeback does not hold a folio reference of its own, relying
 	 * on truncation to wait for the clearing of PG_writeback.
@@ -1657,11 +1733,8 @@ void folio_end_writeback(struct folio *folio)
 	 * reused before the folio_wake_bit().
 	 */
 	folio_get(folio);
-	if (__folio_end_writeback(folio))
-		folio_wake_bit(folio, PG_writeback);
-
-	filemap_end_dropbehind_write(folio);
-	acct_reclaim_writeback(folio);
+	folio_end_writeback_no_dropbehind(folio);
+	folio_end_dropbehind(folio);
 	folio_put(folio);
 }
 EXPORT_SYMBOL(folio_end_writeback);
@@ -1778,9 +1851,8 @@ pgoff_t page_cache_next_miss(struct address_space *mapping,
 			     pgoff_t index, unsigned long max_scan)
 {
 	XA_STATE(xas, &mapping->i_pages, index);
-	unsigned long nr = max_scan;
 
-	while (nr--) {
+	while (max_scan--) {
 		void *entry = xas_next(&xas);
 		if (!entry || xa_is_value(entry))
 			return xas.xa_index;
@@ -1788,7 +1860,8 @@ pgoff_t page_cache_next_miss(struct address_space *mapping,
 			return 0;
 	}
 
-	return index + max_scan;
+	/* Return end of the range + 1 when no hole is found */
+	return xas.xa_index + 1;
 }
 EXPORT_SYMBOL(page_cache_next_miss);
 
@@ -1819,12 +1892,13 @@ pgoff_t page_cache_prev_miss(struct address_space *mapping,
 	while (max_scan--) {
 		void *entry = xas_prev(&xas);
 		if (!entry || xa_is_value(entry))
-			break;
+			return xas.xa_index;
 		if (xas.xa_index == ULONG_MAX)
-			break;
+			return ULONG_MAX;
 	}
 
-	return xas.xa_index;
+	/* Return start of the range - 1 when no hole is found */
+	return xas.xa_index - 1;
 }
 EXPORT_SYMBOL(page_cache_prev_miss);
 
@@ -1892,11 +1966,12 @@ out:
 }
 
 /**
- * __filemap_get_folio - Find and get a reference to a folio.
+ * __filemap_get_folio_mpol - Find and get a reference to a folio.
  * @mapping: The address_space to search.
  * @index: The page index.
  * @fgp_flags: %FGP flags modify how the folio is returned.
  * @gfp: Memory allocation flags to use if %FGP_CREAT is specified.
+ * @policy: NUMA memory allocation policy to follow.
  *
  * Looks up the page cache entry at @mapping & @index.
  *
@@ -1907,8 +1982,8 @@ out:
  *
  * Return: The found folio or an ERR_PTR() otherwise.
  */
-struct folio *__filemap_get_folio(struct address_space *mapping, pgoff_t index,
-		fgf_t fgp_flags, gfp_t gfp)
+struct folio *__filemap_get_folio_mpol(struct address_space *mapping,
+		pgoff_t index, fgf_t fgp_flags, gfp_t gfp, struct mempolicy *policy)
 {
 	struct folio *folio;
 
@@ -1961,7 +2036,7 @@ no_page:
 			gfp &= ~__GFP_FS;
 		if (fgp_flags & FGP_NOWAIT) {
 			gfp &= ~GFP_KERNEL;
-			gfp |= GFP_NOWAIT | __GFP_NOWARN;
+			gfp |= GFP_NOWAIT;
 		}
 		if (WARN_ON_ONCE(!(fgp_flags & (FGP_LOCK | FGP_FOR_MMAP))))
 			fgp_flags |= FGP_LOCK;
@@ -1978,7 +2053,7 @@ no_page:
 			err = -ENOMEM;
 			if (order > min_order)
 				alloc_gfp |= __GFP_NORETRY | __GFP_NOWARN;
-			folio = filemap_alloc_folio(alloc_gfp, order);
+			folio = filemap_alloc_folio(alloc_gfp, order, policy);
 			if (!folio)
 				continue;
 
@@ -2021,11 +2096,22 @@ no_page:
 	if (!folio)
 		return ERR_PTR(-ENOENT);
 	/* not an uncached lookup, clear uncached if set */
-	if (folio_test_dropbehind(folio) && !(fgp_flags & FGP_DONTCACHE))
-		folio_clear_dropbehind(folio);
+	if (!(fgp_flags & FGP_DONTCACHE) && folio_test_clear_dropbehind(folio)) {
+		if (folio_test_dirty(folio) &&
+		    mapping_can_writeback(mapping)) {
+			struct inode *inode = mapping->host;
+			struct bdi_writeback *wb;
+			struct wb_lock_cookie cookie = {};
+			long nr = folio_nr_pages(folio);
+
+			wb = unlocked_inode_to_wb_begin(inode, &cookie);
+			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
+			unlocked_inode_to_wb_end(inode, &cookie);
+		}
+	}
 	return folio;
 }
-EXPORT_SYMBOL(__filemap_get_folio);
+EXPORT_SYMBOL(__filemap_get_folio_mpol);
 
 static inline struct folio *find_get_entry(struct xa_state *xas, pgoff_t max,
 		xa_mark_t mark)
@@ -2252,8 +2338,7 @@ unsigned filemap_get_folios_contig(struct address_space *mapping,
 			goto put_folio;
 
 		if (!folio_batch_add(fbatch, folio)) {
-			nr = folio_nr_pages(folio);
-			*start = folio->index + nr;
+			*start = folio_next_index(folio);
 			goto out;
 		}
 		xas_advance(&xas, folio_next_index(folio) - 1);
@@ -2313,8 +2398,7 @@ unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
 		if (xa_is_value(folio))
 			continue;
 		if (!folio_batch_add(fbatch, folio)) {
-			unsigned long nr = folio_nr_pages(folio);
-			*start = folio->index + nr;
+			*start = folio_next_index(folio);
 			goto out;
 		}
 	}
@@ -2334,6 +2418,63 @@ out:
 	return folio_batch_count(fbatch);
 }
 EXPORT_SYMBOL(filemap_get_folios_tag);
+
+/**
+ * filemap_get_folios_dirty - Get a batch of dirty folios
+ * @mapping:	The address_space to search
+ * @start:	The starting folio index
+ * @end:	The final folio index (inclusive)
+ * @fbatch:	The batch to fill
+ *
+ * filemap_get_folios_dirty() works exactly like filemap_get_folios(), except
+ * the returned folios are presumed to be dirty or undergoing writeback. Dirty
+ * state is presumed because we don't block on folio lock nor want to miss
+ * folios. Callers that need to can recheck state upon locking the folio.
+ *
+ * This may not return all dirty folios if the batch gets filled up.
+ *
+ * Return: The number of folios found.
+ * Also update @start to be positioned for traversal of the next folio.
+ */
+unsigned filemap_get_folios_dirty(struct address_space *mapping, pgoff_t *start,
+			pgoff_t end, struct folio_batch *fbatch)
+{
+	XA_STATE(xas, &mapping->i_pages, *start);
+	struct folio *folio;
+
+	rcu_read_lock();
+	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
+		if (xa_is_value(folio))
+			continue;
+		if (folio_trylock(folio)) {
+			bool clean = !folio_test_dirty(folio) &&
+				     !folio_test_writeback(folio);
+			folio_unlock(folio);
+			if (clean) {
+				folio_put(folio);
+				continue;
+			}
+		}
+		if (!folio_batch_add(fbatch, folio)) {
+			*start = folio_next_index(folio);
+			goto out;
+		}
+	}
+	/*
+	 * We come here when there is no folio beyond @end. We take care to not
+	 * overflow the index @start as it confuses some of the callers. This
+	 * breaks the iteration when there is a folio at index -1 but that is
+	 * already broke anyway.
+	 */
+	if (end == (pgoff_t)-1)
+		*start = (pgoff_t)-1;
+	else
+		*start = end + 1;
+out:
+	rcu_read_unlock();
+
+	return folio_batch_count(fbatch);
+}
 
 /*
  * CD/DVDs are error prone. When a medium error occurs, the driver may fail
@@ -2447,6 +2588,9 @@ static bool filemap_range_uptodate(struct address_space *mapping,
 		pos -= folio_pos(folio);
 	}
 
+	if (pos == 0 && count >= folio_size(folio))
+		return false;
+
 	return mapping->a_ops->is_partially_uptodate(folio, pos, count);
 }
 
@@ -2517,7 +2661,7 @@ static int filemap_create_folio(struct kiocb *iocb, struct folio_batch *fbatch)
 	if (iocb->ki_flags & (IOCB_NOWAIT | IOCB_WAITQ))
 		return -EAGAIN;
 
-	folio = filemap_alloc_folio(mapping_gfp_mask(mapping), min_order);
+	folio = filemap_alloc_folio(mapping_gfp_mask(mapping), min_order, NULL);
 	if (!folio)
 		return -ENOMEM;
 	if (iocb->ki_flags & IOCB_DONTCACHE)
@@ -2584,8 +2728,9 @@ static int filemap_get_pages(struct kiocb *iocb, size_t count,
 	unsigned int flags;
 	int err = 0;
 
-	/* "last_index" is the index of the page beyond the end of the read */
-	last_index = DIV_ROUND_UP(iocb->ki_pos + count, PAGE_SIZE);
+	/* "last_index" is the index of the folio beyond the end of the read */
+	last_index = round_up(iocb->ki_pos + count,
+			mapping_min_folio_nrbytes(mapping)) >> PAGE_SHIFT;
 retry:
 	if (fatal_signal_pending(current))
 		return -EINTR;
@@ -2619,9 +2764,10 @@ retry:
 			goto err;
 	}
 	if (!folio_test_uptodate(folio)) {
-		if ((iocb->ki_flags & IOCB_WAITQ) &&
-		    folio_batch_count(fbatch) > 1)
-			iocb->ki_flags |= IOCB_NOWAIT;
+		if (folio_batch_count(fbatch) > 1) {
+			err = -EAGAIN;
+			goto err;
+		}
 		err = filemap_update_page(iocb, mapping, count, folio,
 					  need_uptodate);
 		if (err)
@@ -3217,53 +3363,75 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 	DEFINE_READAHEAD(ractl, file, ra, mapping, vmf->pgoff);
 	struct file *fpin = NULL;
 	vm_flags_t vm_flags = vmf->vma->vm_flags;
+	bool force_thp_readahead = false;
+	unsigned int thp_order = 0;
 	unsigned short mmap_miss;
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	/* Use the readahead code, even if readahead is disabled */
-	if ((vm_flags & VM_HUGEPAGE) && HPAGE_PMD_ORDER <= MAX_PAGECACHE_ORDER) {
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
-		ractl._index &= ~((unsigned long)HPAGE_PMD_NR - 1);
-		ra->size = HPAGE_PMD_NR;
+	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && (vm_flags & VM_HUGEPAGE)) {
 		/*
-		 * Fetch two PMD folios, so we get the chance to actually
+		 * Cap max THP order at 2MB: this is the common PMD-sized
+		 * hugepage size, and it avoids memory pressure from very
+		 * large forced readahead when mapping_max_folio_order() is
+		 * high (for example, 128MB with 64K base pages on arm64).
+		 */
+		if (mapping_large_folio_support(mapping)) {
+			force_thp_readahead = true;
+			thp_order = min_t(unsigned int,
+					  mapping_max_folio_order(mapping),
+					  get_order(SZ_2M));
+		}
+	}
+
+	if (!force_thp_readahead) {
+		/*
+		 * If we don't want any read-ahead, don't bother.
+		 * VM_EXEC case below is already intended for random access.
+		 */
+		if ((vm_flags & (VM_RAND_READ | VM_EXEC)) == VM_RAND_READ)
+			return fpin;
+
+		if (!ra->ra_pages)
+			return fpin;
+
+		if (vm_flags & VM_SEQ_READ) {
+			fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+			page_cache_sync_ra(&ractl, ra->ra_pages);
+			return fpin;
+		}
+	}
+
+	if (!(vm_flags & (VM_SEQ_READ | VM_EXEC))) {
+		/* Avoid banging the cache line if not needed */
+		mmap_miss = READ_ONCE(ra->mmap_miss);
+		if (mmap_miss < MMAP_LOTSAMISS * 10)
+			WRITE_ONCE(ra->mmap_miss, ++mmap_miss);
+
+		/*
+		 * Do we miss much more than hit in this file? If so,
+		 * stop bothering with read-ahead. It will only hurt.
+		 */
+		if (mmap_miss > MMAP_LOTSAMISS)
+			return fpin;
+	}
+
+	if (force_thp_readahead) {
+		unsigned long folio_nr_pages = 1UL << thp_order;
+
+		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+		ractl._index &= ~(folio_nr_pages - 1);
+		ra->size = folio_nr_pages;
+		/*
+		 * Fetch two folios so we get the chance to actually
 		 * readahead, unless we've been told not to.
 		 */
 		if (!(vm_flags & VM_RAND_READ))
 			ra->size *= 2;
-		ra->async_size = HPAGE_PMD_NR;
-		ra->order = HPAGE_PMD_ORDER;
+		ra->async_size = folio_nr_pages;
+		ra->order = thp_order;
 		page_cache_ra_order(&ractl, ra);
 		return fpin;
 	}
-#endif
-
-	/*
-	 * If we don't want any read-ahead, don't bother. VM_EXEC case below is
-	 * already intended for random access.
-	 */
-	if ((vm_flags & (VM_RAND_READ | VM_EXEC)) == VM_RAND_READ)
-		return fpin;
-	if (!ra->ra_pages)
-		return fpin;
-
-	if (vm_flags & VM_SEQ_READ) {
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
-		page_cache_sync_ra(&ractl, ra->ra_pages);
-		return fpin;
-	}
-
-	/* Avoid banging the cache line if not needed */
-	mmap_miss = READ_ONCE(ra->mmap_miss);
-	if (mmap_miss < MMAP_LOTSAMISS * 10)
-		WRITE_ONCE(ra->mmap_miss, ++mmap_miss);
-
-	/*
-	 * Do we miss much more than hit in this file? If so,
-	 * stop bothering with read-ahead. It will only hurt.
-	 */
-	if (mmap_miss > MMAP_LOTSAMISS)
-		return fpin;
 
 	if (vm_flags & VM_EXEC) {
 		/*
@@ -3323,9 +3491,22 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
 	if (vmf->vma->vm_flags & VM_RAND_READ || !ra->ra_pages)
 		return fpin;
 
-	mmap_miss = READ_ONCE(ra->mmap_miss);
-	if (mmap_miss)
-		WRITE_ONCE(ra->mmap_miss, --mmap_miss);
+	/*
+	 * If the folio is locked, we're likely racing against another fault.
+	 * Don't touch the mmap_miss counter to avoid decreasing it multiple
+	 * times for a single folio and break the balance with mmap_miss
+	 * increase in do_sync_mmap_readahead().
+	 *
+	 * VM_SEQ_READ and VM_EXEC mappings skip the mmap_miss increment in
+	 * do_sync_mmap_readahead(), so skip the decrement here as well to
+	 * keep the counter symmetric.
+	 */
+	if (likely(!folio_test_locked(folio)) &&
+	    !(vmf->vma->vm_flags & (VM_SEQ_READ | VM_EXEC))) {
+		mmap_miss = READ_ONCE(ra->mmap_miss);
+		if (mmap_miss)
+			WRITE_ONCE(ra->mmap_miss, --mmap_miss);
+	}
 
 	if (folio_test_readahead(folio)) {
 		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
@@ -3637,26 +3818,37 @@ skip:
 static vm_fault_t filemap_map_folio_range(struct vm_fault *vmf,
 			struct folio *folio, unsigned long start,
 			unsigned long addr, unsigned int nr_pages,
-			unsigned long *rss, unsigned short *mmap_miss)
+			unsigned long *rss, pgoff_t file_end)
 {
+	struct address_space *mapping = folio->mapping;
+	unsigned int ref_from_caller = 1;
 	vm_fault_t ret = 0;
 	struct page *page = folio_page(folio, start);
 	unsigned int count = 0;
 	pte_t *old_ptep = vmf->pte;
+	unsigned long addr0;
+
+	/*
+	 * Map the large folio fully where possible:
+	 *
+	 *  - The folio is fully within size of the file or belong
+	 *    to shmem/tmpfs;
+	 *  - The folio doesn't cross VMA boundary;
+	 *  - The folio doesn't cross page table boundary;
+	 */
+	addr0 = addr - start * PAGE_SIZE;
+	if ((file_end >= folio_next_index(folio) || shmem_mapping(mapping)) &&
+	    folio_within_vma(folio, vmf->vma) &&
+	    (addr0 & PMD_MASK) == ((addr0 + folio_size(folio) - 1) & PMD_MASK)) {
+		vmf->pte -= start;
+		page -= start;
+		addr = addr0;
+		nr_pages = folio_nr_pages(folio);
+	}
 
 	do {
 		if (PageHWPoison(page + count))
 			goto skip;
-
-		/*
-		 * If there are too many folios that are recently evicted
-		 * in a file, they will probably continue to be evicted.
-		 * In such situation, read-ahead is only a waste of IO.
-		 * Don't decrease mmap_miss in this scenario to make sure
-		 * we can stop read-ahead.
-		 */
-		if (!folio_test_workingset(folio))
-			(*mmap_miss)++;
 
 		/*
 		 * NOTE: If there're PTE markers, we'll leave them to be
@@ -3672,7 +3864,8 @@ skip:
 		if (count) {
 			set_pte_range(vmf, folio, page, count, addr);
 			*rss += count;
-			folio_ref_add(folio, count);
+			folio_ref_add(folio, count - ref_from_caller);
+			ref_from_caller = 0;
 			if (in_range(vmf->address, addr, count * PAGE_SIZE))
 				ret = VM_FAULT_NOPAGE;
 		}
@@ -3687,29 +3880,29 @@ skip:
 	if (count) {
 		set_pte_range(vmf, folio, page, count, addr);
 		*rss += count;
-		folio_ref_add(folio, count);
+		folio_ref_add(folio, count - ref_from_caller);
+		ref_from_caller = 0;
 		if (in_range(vmf->address, addr, count * PAGE_SIZE))
 			ret = VM_FAULT_NOPAGE;
 	}
 
 	vmf->pte = old_ptep;
+	if (ref_from_caller)
+		/* Locked folios cannot get truncated. */
+		folio_ref_dec(folio);
 
 	return ret;
 }
 
 static vm_fault_t filemap_map_order0_folio(struct vm_fault *vmf,
 		struct folio *folio, unsigned long addr,
-		unsigned long *rss, unsigned short *mmap_miss)
+		unsigned long *rss)
 {
 	vm_fault_t ret = 0;
 	struct page *page = &folio->page;
 
 	if (PageHWPoison(page))
-		return ret;
-
-	/* See comment of filemap_map_folio_range() */
-	if (!folio_test_workingset(folio))
-		(*mmap_miss)++;
+		goto out;
 
 	/*
 	 * NOTE: If there're PTE markers, we'll leave them to be
@@ -3717,15 +3910,18 @@ static vm_fault_t filemap_map_order0_folio(struct vm_fault *vmf,
 	 * the fault-around logic.
 	 */
 	if (!pte_none(ptep_get(vmf->pte)))
-		return ret;
+		goto out;
 
 	if (vmf->address == addr)
 		ret = VM_FAULT_NOPAGE;
 
 	set_pte_range(vmf, folio, page, 1, addr);
 	(*rss)++;
-	folio_ref_inc(folio);
+	return ret;
 
+out:
+	/* Locked folios cannot get truncated. */
+	folio_ref_dec(folio);
 	return ret;
 }
 
@@ -3742,14 +3938,29 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 	vm_fault_t ret = 0;
 	unsigned long rss = 0;
 	unsigned int nr_pages = 0, folio_type;
-	unsigned short mmap_miss = 0, mmap_miss_saved;
+
+	/*
+	 * Recalculate end_pgoff based on file_end before calling
+	 * next_uptodate_folio() to avoid races with concurrent
+	 * truncation.
+	 */
+	file_end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE) - 1;
+	end_pgoff = min(end_pgoff, file_end);
 
 	rcu_read_lock();
 	folio = next_uptodate_folio(&xas, mapping, end_pgoff);
 	if (!folio)
 		goto out;
 
-	if (filemap_map_pmd(vmf, folio, start_pgoff)) {
+	/*
+	 * Do not allow to map with PMD across i_size to preserve
+	 * SIGBUS semantics.
+	 *
+	 * Make an exception for shmem/tmpfs that for long time
+	 * intentionally mapped with PMDs across i_size.
+	 */
+	if ((file_end >= folio_next_index(folio) || shmem_mapping(mapping)) &&
+	    filemap_map_pmd(vmf, folio, start_pgoff)) {
 		ret = VM_FAULT_NOPAGE;
 		goto out;
 	}
@@ -3762,13 +3973,10 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 		goto out;
 	}
 
-	file_end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE) - 1;
-	if (end_pgoff > file_end)
-		end_pgoff = file_end;
-
 	folio_type = mm_counter_file(folio);
 	do {
 		unsigned long end;
+		vm_fault_t map_ret;
 
 		addr += (xas.xa_index - last_pgoff) << PAGE_SHIFT;
 		vmf->pte += xas.xa_index - last_pgoff;
@@ -3776,28 +3984,48 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 		end = folio_next_index(folio) - 1;
 		nr_pages = min(end, end_pgoff) - xas.xa_index + 1;
 
-		if (!folio_test_large(folio))
-			ret |= filemap_map_order0_folio(vmf,
-					folio, addr, &rss, &mmap_miss);
-		else
-			ret |= filemap_map_folio_range(vmf, folio,
-					xas.xa_index - folio->index, addr,
-					nr_pages, &rss, &mmap_miss);
+		if (!folio_test_large(folio)) {
+			map_ret = filemap_map_order0_folio(vmf, folio, addr,
+							   &rss);
+		} else {
+			unsigned long start = xas.xa_index - folio->index;
+
+			map_ret = filemap_map_folio_range(vmf, folio, start,
+							  addr, nr_pages, &rss,
+							  file_end);
+		}
+		ret |= map_ret;
+
+		/*
+		 * If there are too many folios that are recently evicted
+		 * in a file, they will probably continue to be evicted.
+		 * In such situation, read-ahead is only a waste of IO.
+		 * Don't decrease mmap_miss in this scenario to make sure
+		 * we can stop read-ahead.
+		 *
+		 * VM_SEQ_READ and VM_EXEC mappings skip the mmap_miss
+		 * increment in do_sync_mmap_readahead(), so skip the
+		 * decrement here as well to keep the counter symmetric.
+		 */
+		if ((map_ret & VM_FAULT_NOPAGE) &&
+		    !(vmf->flags & FAULT_FLAG_TRIED) &&
+		    !folio_test_workingset(folio) &&
+		    !(vma->vm_flags & (VM_SEQ_READ | VM_EXEC))) {
+			unsigned short mmap_miss;
+
+			mmap_miss = READ_ONCE(file->f_ra.mmap_miss);
+			if (mmap_miss)
+				WRITE_ONCE(file->f_ra.mmap_miss,
+					   mmap_miss - 1);
+		}
 
 		folio_unlock(folio);
-		folio_put(folio);
 	} while ((folio = next_uptodate_folio(&xas, mapping, end_pgoff)) != NULL);
 	add_mm_counter(vma->vm_mm, folio_type, rss);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	trace_mm_filemap_map_pages(mapping, start_pgoff, end_pgoff);
 out:
 	rcu_read_unlock();
-
-	mmap_miss_saved = READ_ONCE(file->f_ra.mmap_miss);
-	if (mmap_miss >= mmap_miss_saved)
-		WRITE_ONCE(file->f_ra.mmap_miss, 0);
-	else
-		WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss_saved - mmap_miss);
 
 	return ret;
 }
@@ -3872,7 +4100,7 @@ int generic_file_readonly_mmap(struct file *file, struct vm_area_struct *vma)
 
 int generic_file_readonly_mmap_prepare(struct vm_area_desc *desc)
 {
-	if (is_shared_maywrite(desc->vm_flags))
+	if (is_shared_maywrite(&desc->vma_flags))
 		return -EINVAL;
 	return generic_file_mmap_prepare(desc);
 }
@@ -3916,8 +4144,7 @@ static struct folio *do_read_cache_folio(struct address_space *mapping,
 repeat:
 	folio = filemap_get_folio(mapping, index);
 	if (IS_ERR(folio)) {
-		folio = filemap_alloc_folio(gfp,
-					    mapping_min_folio_order(mapping));
+		folio = filemap_alloc_folio(gfp, mapping_min_folio_order(mapping), NULL);
 		if (!folio)
 			return ERR_PTR(-ENOMEM);
 		index = mapping_align_index(mapping, index);
@@ -4390,16 +4617,8 @@ int filemap_invalidate_inode(struct inode *inode, bool flush,
 	unmap_mapping_pages(mapping, first, nr, false);
 
 	/* Write back the data if we're asked to. */
-	if (flush) {
-		struct writeback_control wbc = {
-			.sync_mode	= WB_SYNC_ALL,
-			.nr_to_write	= LONG_MAX,
-			.range_start	= start,
-			.range_end	= end,
-		};
-
-		filemap_fdatawrite_wbc(mapping, &wbc);
-	}
+	if (flush)
+		filemap_fdatawrite_range(mapping, start, end);
 
 	/* Wait for writeback to complete on all folios and discard. */
 	invalidate_inode_pages2_range(mapping, start / PAGE_SIZE, end / PAGE_SIZE);
@@ -4478,7 +4697,7 @@ static void filemap_cachestat(struct address_space *mapping,
 				swp_entry_t swp = radix_to_swp_entry(folio);
 
 				/* swapin error results in poisoned entry */
-				if (non_swap_entry(swp))
+				if (!softleaf_is_swap(swp))
 					goto resched;
 
 				/*
@@ -4491,7 +4710,7 @@ static void filemap_cachestat(struct address_space *mapping,
 				 * invalidation, so there might not be
 				 * a shadow in the swapcache (yet).
 				 */
-				shadow = get_shadow_from_swap_cache(swp);
+				shadow = swap_cache_get_shadow(swp);
 				if (!shadow)
 					goto resched;
 			}
@@ -4529,7 +4748,7 @@ static inline bool can_do_cachestat(struct file *f)
 {
 	if (f->f_mode & FMODE_WRITE)
 		return true;
-	if (inode_owner_or_capable(file_mnt_idmap(f), file_inode(f)))
+	if (file_owner_or_capable(f))
 		return true;
 	return file_permission(f, MAY_WRITE) == 0;
 }

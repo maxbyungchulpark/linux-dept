@@ -7,7 +7,6 @@
 
 #include <linux/slab.h>
 #include <linux/mempool.h>
-#include <linux/delay.h>
 #include "internal.h"
 
 static void netfs_free_request(struct work_struct *work);
@@ -26,17 +25,23 @@ struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 	struct netfs_io_request *rreq;
 	mempool_t *mempool = ctx->ops->request_pool ?: &netfs_request_pool;
 	struct kmem_cache *cache = mempool->pool_data;
+	gfp_t gfp = GFP_KERNEL;
 	int ret;
 
-	for (;;) {
-		rreq = mempool_alloc(mempool, GFP_KERNEL);
-		if (rreq)
-			break;
-		msleep(10);
+	/* Writeback is part of memory reclaim and must not fail due to ENOMEM. */
+	if (origin == NETFS_WRITEBACK || origin == NETFS_WRITEBACK_SINGLE) {
+		gfp = GFP_NOFS; /* Allows use of mempools. */
+
+		rreq = mempool_alloc(mempool, gfp);
+	} else {
+		rreq = mempool->alloc(gfp, mempool->pool_data);
+		if (!rreq)
+			return ERR_PTR(-ENOMEM);
 	}
 
 	memset(rreq, 0, kmem_cache_size(cache));
 	INIT_WORK(&rreq->cleanup_work, netfs_free_request);
+	rreq->gfp	= gfp;
 	rreq->start	= start;
 	rreq->len	= len;
 	rreq->origin	= origin;
@@ -116,10 +121,8 @@ static void netfs_free_request_rcu(struct rcu_head *rcu)
 	netfs_stat_d(&netfs_n_rh_rreq);
 }
 
-static void netfs_free_request(struct work_struct *work)
+static void netfs_deinit_request(struct netfs_io_request *rreq)
 {
-	struct netfs_io_request *rreq =
-		container_of(work, struct netfs_io_request, cleanup_work);
 	struct netfs_inode *ictx = netfs_inode(rreq->inode);
 	unsigned int i;
 
@@ -149,6 +152,14 @@ static void netfs_free_request(struct work_struct *work)
 
 	if (atomic_dec_and_test(&ictx->io_count))
 		wake_up_var(&ictx->io_count);
+}
+
+static void netfs_free_request(struct work_struct *work)
+{
+	struct netfs_io_request *rreq =
+		container_of(work, struct netfs_io_request, cleanup_work);
+
+	netfs_deinit_request(rreq);
 	call_rcu(&rreq->rcu, netfs_free_request_rcu);
 }
 
@@ -163,8 +174,26 @@ void netfs_put_request(struct netfs_io_request *rreq, enum netfs_rreq_ref_trace 
 		dead = __refcount_dec_and_test(&rreq->ref, &r);
 		trace_netfs_rreq_ref(debug_id, r - 1, what);
 		if (dead)
-			WARN_ON(!queue_work(system_unbound_wq, &rreq->cleanup_work));
+			WARN_ON(!queue_work(system_dfl_wq, &rreq->cleanup_work));
 	}
+}
+
+/*
+ * Free a request (synchronously) that was just allocated but has
+ * failed before it could be submitted.
+ */
+void netfs_put_failed_request(struct netfs_io_request *rreq)
+{
+	int r = refcount_read(&rreq->ref);
+
+	/* new requests have two references (see
+	 * netfs_alloc_request(), and this function is only allowed on
+	 * new request objects
+	 */
+	WARN_ON_ONCE(r != 2);
+
+	trace_netfs_rreq_ref(rreq->debug_id, r, netfs_rreq_trace_put_failed);
+	netfs_free_request(&rreq->cleanup_work);
 }
 
 /*
@@ -176,13 +205,12 @@ struct netfs_io_subrequest *netfs_alloc_subrequest(struct netfs_io_request *rreq
 	mempool_t *mempool = rreq->netfs_ops->subrequest_pool ?: &netfs_subrequest_pool;
 	struct kmem_cache *cache = mempool->pool_data;
 
-	for (;;) {
-		subreq = mempool_alloc(rreq->netfs_ops->subrequest_pool ?: &netfs_subrequest_pool,
-				       GFP_KERNEL);
-		if (subreq)
-			break;
-		msleep(10);
-	}
+	if (rreq->gfp == GFP_KERNEL)
+		subreq = mempool->alloc(rreq->gfp, mempool->pool_data);
+	else
+		subreq = mempool_alloc(mempool, rreq->gfp);
+	if (!subreq)
+		return NULL;
 
 	memset(subreq, 0, kmem_cache_size(cache));
 	INIT_WORK(&subreq->work, NULL);

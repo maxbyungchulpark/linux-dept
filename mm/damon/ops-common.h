@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Common Code for Data Access Monitoring
- *
- * Author: SeongJae Park <sj@kernel.org>
  */
 
 #include <linux/damon.h>
@@ -21,3 +19,5 @@ int damon_hot_score(struct damon_ctx *c, struct damon_region *r,
 
 bool damos_folio_filter_match(struct damos_filter *filter, struct folio *folio);
 unsigned long damon_migrate_pages(struct list_head *folio_list, int target_nid);
+
+bool damos_ops_has_filter(struct damos *s);

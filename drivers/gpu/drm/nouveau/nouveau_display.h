@@ -8,8 +8,11 @@
 
 #include <drm/drm_framebuffer.h>
 
+struct drm_format_info;
+
 int
 nouveau_framebuffer_new(struct drm_device *dev,
+			const struct drm_format_info *info,
 			const struct drm_mode_fb_cmd2 *mode_cmd,
 			struct drm_gem_object *gem,
 			struct drm_framebuffer **pfb);
@@ -31,7 +34,7 @@ struct nouveau_display {
 	struct drm_property *vibrant_hue_property;
 	struct drm_property *color_vibrance_property;
 
-	struct drm_atomic_state *suspend;
+	struct drm_atomic_commit *suspend;
 
 	const u64 *format_modifiers;
 };

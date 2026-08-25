@@ -8,7 +8,6 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/bitops.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -636,10 +635,8 @@ static int kxcjk1013_set_power_state(struct kxcjk1013_data *data, bool on)
 
 	if (on)
 		ret = pm_runtime_resume_and_get(&data->client->dev);
-	else {
-		pm_runtime_mark_last_busy(&data->client->dev);
+	else
 		ret = pm_runtime_put_autosuspend(&data->client->dev);
-	}
 	if (ret < 0) {
 		dev_err(&data->client->dev,
 			"Failed: %s for %d\n", __func__, on);
@@ -1632,11 +1629,11 @@ static const struct dev_pm_ops kxcjk1013_pm_ops = {
 };
 
 static const struct i2c_device_id kxcjk1013_id[] = {
-	{ "kxcjk1013",  (kernel_ulong_t)&kxcjk1013_info },
-	{ "kxcj91008",  (kernel_ulong_t)&kxcj91008_info },
-	{ "kxtj21009",  (kernel_ulong_t)&kxtj21009_info },
-	{ "kxtf9", (kernel_ulong_t)&kxtf9_info },
-	{ "kx023-1025", (kernel_ulong_t)&kx0231025_info },
+	{ .name = "kxcjk1013", .driver_data = (kernel_ulong_t)&kxcjk1013_info },
+	{ .name = "kxcj91008", .driver_data = (kernel_ulong_t)&kxcj91008_info },
+	{ .name = "kxtj21009", .driver_data = (kernel_ulong_t)&kxtj21009_info },
+	{ .name = "kxtf9", .driver_data = (kernel_ulong_t)&kxtf9_info },
+	{ .name = "kx023-1025", .driver_data = (kernel_ulong_t)&kx0231025_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, kxcjk1013_id);

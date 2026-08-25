@@ -64,7 +64,7 @@ int page_pool_ethtool_stats_get_count(void);
 u8 *page_pool_ethtool_stats_get_strings(u8 *data);
 u64 *page_pool_ethtool_stats_get(u64 *data, const void *stats);
 
-bool page_pool_get_stats(const struct page_pool *pool,
+void page_pool_get_stats(const struct page_pool *pool,
 			 struct page_pool_stats *stats);
 #else
 static inline int page_pool_ethtool_stats_get_count(void)
@@ -489,6 +489,11 @@ page_pool_dma_sync_netmem_for_cpu(const struct page_pool *pool,
 				     offset, dma_sync_size);
 }
 
+static inline void page_pool_get(struct page_pool *pool)
+{
+	refcount_inc(&pool->user_cnt);
+}
+
 static inline bool page_pool_put(struct page_pool *pool)
 {
 	return refcount_dec_and_test(&pool->user_cnt);
@@ -500,6 +505,18 @@ static inline void page_pool_nid_changed(struct page_pool *pool, int new_nid)
 		page_pool_update_nid(pool, new_nid);
 }
 
+/**
+ * page_pool_is_unreadable() - will allocated buffers be unreadable for the CPU
+ * @pool: queried page pool
+ *
+ * Check if page pool will return buffers which are unreadable to the CPU /
+ * kernel. This will only be the case if user space bound a memory provider (mp)
+ * which returns unreadable memory to the queue served by the page pool.
+ * If %PP_FLAG_ALLOW_UNREADABLE_NETMEM was set but there is no mp bound
+ * this helper will return false. See also netif_rxq_has_unreadable_mp().
+ *
+ * Return: true if memory allocated by the page pool may be unreadable
+ */
 static inline bool page_pool_is_unreadable(struct page_pool *pool)
 {
 	return !!pool->mp_ops;

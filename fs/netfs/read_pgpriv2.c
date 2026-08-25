@@ -53,7 +53,8 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	trace_netfs_folio(folio, netfs_folio_trace_store_copy);
 
 	/* Attach the folio to the rolling buffer. */
-	if (rolling_buffer_append(&creq->buffer, folio, 0) < 0) {
+	if (rolling_buffer_append(&creq->buffer, folio, 0, creq->gfp) < 0) {
+		folio_end_private_2(folio);
 		clear_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &creq->flags);
 		return;
 	}
@@ -118,7 +119,7 @@ static struct netfs_io_request *netfs_pgpriv2_begin_copy_to_cache(
 	return creq;
 
 cancel_put:
-	netfs_put_request(creq, netfs_rreq_trace_put_return);
+	netfs_put_failed_request(creq);
 cancel:
 	rreq->copy_to_cache = ERR_PTR(-ENOBUFS);
 	clear_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags);

@@ -202,7 +202,7 @@ static void init_shared_classes(void)
 	local_irq_disable();			\
 	__irq_enter();				\
 	lockdep_hardirq_threaded();		\
-	WARN_ON(!in_irq());
+	WARN_ON(!in_hardirq());
 
 #define HARDIRQ_EXIT()				\
 	__irq_exit();				\
@@ -1398,6 +1398,8 @@ static void reset_locks(void)
 	local_irq_disable();
 	lockdep_free_key_range(&ww_lockdep.acquire_key, 1);
 	lockdep_free_key_range(&ww_lockdep.mutex_key, 1);
+	dept_free_range(&ww_lockdep.acquire_key, 1);
+	dept_free_range(&ww_lockdep.mutex_key, 1);
 
 	I1(A); I1(B); I1(C); I1(D);
 	I1(X1); I1(X2); I1(Y1); I1(Y2); I1(Z1); I1(Z2);
@@ -1431,10 +1433,9 @@ static void dotest(void (*testcase_fn)(void), int expected, int lockclass_mask)
 {
 	int saved_preempt_count = preempt_count();
 #ifdef CONFIG_PREEMPT_RT
-#ifdef CONFIG_SMP
 	int saved_mgd_count = current->migration_disabled;
-#endif
 	int saved_rcu_count = current->rcu_read_lock_nesting;
+	int saved_sched_rt_mutex = current->sched_rt_mutex;
 #endif
 
 	WARN_ON(irqs_disabled());
@@ -1471,10 +1472,10 @@ static void dotest(void (*testcase_fn)(void), int expected, int lockclass_mask)
 	preempt_count_set(saved_preempt_count);
 
 #ifdef CONFIG_PREEMPT_RT
-#ifdef CONFIG_SMP
+	current->sched_rt_mutex = saved_sched_rt_mutex;
+
 	while (current->migration_disabled > saved_mgd_count)
 		migrate_enable();
-#endif
 
 	while (current->rcu_read_lock_nesting > saved_rcu_count)
 		rcu_read_unlock();
@@ -2512,7 +2513,7 @@ DEFINE_LOCK_GUARD_0(NOTTHREADED_HARDIRQ,
 	do {
 		local_irq_disable();
 		__irq_enter();
-		WARN_ON(!in_irq());
+		WARN_ON(!in_hardirq());
 	} while(0), HARDIRQ_EXIT())
 DEFINE_LOCK_GUARD_0(SOFTIRQ, SOFTIRQ_ENTER(), SOFTIRQ_EXIT())
 

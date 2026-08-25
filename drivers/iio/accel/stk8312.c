@@ -504,10 +504,8 @@ static int stk8312_probe(struct i2c_client *client)
 	struct stk8312_data *data;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
-	if (!indio_dev) {
-		dev_err(&client->dev, "iio allocation failed!\n");
+	if (!indio_dev)
 		return -ENOMEM;
-	}
 
 	data = iio_priv(indio_dev);
 	data->client = client;
@@ -632,8 +630,8 @@ static DEFINE_SIMPLE_DEV_PM_OPS(stk8312_pm_ops, stk8312_suspend,
 
 static const struct i2c_device_id stk8312_i2c_id[] = {
 	/* Deprecated in favour of lowercase form */
-	{ "STK8312" },
-	{ "stk8312" },
+	{ .name = "STK8312" },
+	{ .name = "stk8312" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, stk8312_i2c_id);

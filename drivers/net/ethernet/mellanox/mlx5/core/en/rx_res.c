@@ -40,13 +40,38 @@ static u32 *get_vhca_ids(struct mlx5e_rx_res *res, int offset)
 	return multi_vhca ? res->rss_vhca_ids + offset : NULL;
 }
 
-void mlx5e_rx_res_rss_update_num_channels(struct mlx5e_rx_res *res, u32 nch)
+/* Updates the indirection table SW shadow, does not update the HW resources yet
+ */
+void mlx5e_rx_res_rss_update_num_channels(struct mlx5e_rx_res *res, u32 nch,
+					  struct net_device *netdev)
 {
+	u32 new_size = mlx5e_rqt_size(res->mdev, nch);
 	int i;
 
-	for (i = 0; i < MLX5E_MAX_NUM_RSS; i++) {
-		if (res->rss[i])
-			mlx5e_rss_params_indir_modify_actual_size(res->rss[i], nch);
+	WARN_ON_ONCE(res->rss_active);
+
+	/* Default context: fold/unfold user-configured table, then update size
+	 * and reset to uniform when unconfigured.
+	 */
+	mlx5e_rss_indir_resize(res->rss[0], netdev, new_size);
+
+	/* mlx5e_rss_indir_resize() is a no-op when the table is not
+	 * user-configured. actual_table_size is updated after the resize
+	 * because ethtool_rxfh_indir_resize() uses it as the old size to
+	 * replicate the pattern; updating it first would make the grow a no-op.
+	 * It must be updated before mlx5e_rss_set_indir_uniform() so that
+	 * the uniform fill covers all new entries, not just the old ones.
+	 */
+	mlx5e_rss_set_indir_actual_size(res->rss[0], new_size);
+	if (!netif_is_rxfh_configured(netdev))
+		mlx5e_rss_set_indir_uniform(res->rss[0], nch);
+
+	/* Non-default contexts */
+	for (i = 1; i < MLX5E_MAX_NUM_RSS; i++) {
+		if (res->rss[i]) {
+			mlx5e_rss_ctx_resize(res->rss[i], new_size);
+			mlx5e_rss_set_indir_actual_size(res->rss[i], new_size);
+		}
 	}
 }
 
@@ -54,17 +79,32 @@ static int mlx5e_rx_res_rss_init_def(struct mlx5e_rx_res *res,
 				     unsigned int init_nch)
 {
 	bool inner_ft_support = res->features & MLX5E_RX_RES_FEATURE_INNER_FT;
+	struct mlx5e_rss_init_params init_params;
+	struct mlx5e_rss_params rss_params;
 	struct mlx5e_rss *rss;
 
 	if (WARN_ON(res->rss[0]))
 		return -EINVAL;
 
-	rss = mlx5e_rss_init(res->mdev, inner_ft_support, res->drop_rqn,
-			     &res->pkt_merge_param, MLX5E_RSS_INIT_TIRS, init_nch, res->max_nch);
+	init_params = (struct mlx5e_rss_init_params) {
+		.type = MLX5E_RSS_INIT_TIRS,
+		.pkt_merge_param = &res->pkt_merge_param,
+		.nch = init_nch,
+		.max_nch = res->max_nch,
+	};
+
+	rss_params = (struct mlx5e_rss_params) {
+		.inner_ft_support = inner_ft_support,
+		.drop_rqn = res->drop_rqn,
+		.self_lb_blk =
+			res->features & MLX5E_RX_RES_FEATURE_SELF_LB_BLOCK,
+	};
+
+	rss = mlx5e_rss_init(res->mdev, &rss_params, &init_params);
 	if (IS_ERR(rss))
 		return PTR_ERR(rss);
 
-	mlx5e_rss_set_indir_uniform(rss, init_nch);
+	mlx5e_rss_set_indir_uniform(rss, init_params.nch);
 
 	res->rss[0] = rss;
 
@@ -74,18 +114,32 @@ static int mlx5e_rx_res_rss_init_def(struct mlx5e_rx_res *res,
 int mlx5e_rx_res_rss_init(struct mlx5e_rx_res *res, u32 rss_idx, unsigned int init_nch)
 {
 	bool inner_ft_support = res->features & MLX5E_RX_RES_FEATURE_INNER_FT;
+	struct mlx5e_rss_init_params init_params;
+	struct mlx5e_rss_params rss_params;
 	struct mlx5e_rss *rss;
 
 	if (WARN_ON_ONCE(res->rss[rss_idx]))
 		return -ENOSPC;
 
-	rss = mlx5e_rss_init(res->mdev, inner_ft_support, res->drop_rqn,
-			     &res->pkt_merge_param, MLX5E_RSS_INIT_NO_TIRS, init_nch,
-			     res->max_nch);
+	init_params = (struct mlx5e_rss_init_params) {
+		.type = MLX5E_RSS_INIT_NO_TIRS,
+		.pkt_merge_param = &res->pkt_merge_param,
+		.nch = init_nch,
+		.max_nch = res->max_nch,
+	};
+
+	rss_params = (struct mlx5e_rss_params) {
+		.inner_ft_support = inner_ft_support,
+		.drop_rqn = res->drop_rqn,
+		.self_lb_blk =
+			res->features & MLX5E_RX_RES_FEATURE_SELF_LB_BLOCK,
+	};
+
+	rss = mlx5e_rss_init(res->mdev, &rss_params, &init_params);
 	if (IS_ERR(rss))
 		return PTR_ERR(rss);
 
-	mlx5e_rss_set_indir_uniform(rss, init_nch);
+	mlx5e_rss_set_indir_uniform(rss, init_params.nch);
 	if (res->rss_active) {
 		u32 *vhca_ids = get_vhca_ids(res, 0);
 
@@ -178,13 +232,6 @@ static void mlx5e_rx_res_rss_disable(struct mlx5e_rx_res *res)
 			continue;
 		mlx5e_rss_disable(rss);
 	}
-}
-
-/* Updates the indirection table SW shadow, does not update the HW resources yet */
-void mlx5e_rx_res_rss_set_indir_uniform(struct mlx5e_rx_res *res, unsigned int nch)
-{
-	WARN_ON_ONCE(res->rss_active);
-	mlx5e_rss_set_indir_uniform(res->rss[0], nch);
 }
 
 void mlx5e_rx_res_rss_get_rxfh(struct mlx5e_rx_res *res, u32 rss_idx,
@@ -296,7 +343,7 @@ static struct mlx5e_rx_res *mlx5e_rx_res_alloc(struct mlx5_core_dev *mdev, unsig
 {
 	struct mlx5e_rx_res *rx_res;
 
-	rx_res = kvzalloc(sizeof(*rx_res), GFP_KERNEL);
+	rx_res = kvzalloc_obj(*rx_res);
 	if (!rx_res)
 		return NULL;
 
@@ -321,6 +368,7 @@ static struct mlx5e_rx_res *mlx5e_rx_res_alloc(struct mlx5_core_dev *mdev, unsig
 static int mlx5e_rx_res_channels_init(struct mlx5e_rx_res *res)
 {
 	bool inner_ft_support = res->features & MLX5E_RX_RES_FEATURE_INNER_FT;
+	bool self_lb_blk = res->features & MLX5E_RX_RES_FEATURE_SELF_LB_BLOCK;
 	struct mlx5e_tir_builder *builder;
 	int err = 0;
 	int ix;
@@ -329,7 +377,7 @@ static int mlx5e_rx_res_channels_init(struct mlx5e_rx_res *res)
 	if (!builder)
 		return -ENOMEM;
 
-	res->channels = kvcalloc(res->max_nch, sizeof(*res->channels), GFP_KERNEL);
+	res->channels = kvzalloc_objs(*res->channels, res->max_nch);
 	if (!res->channels) {
 		err = -ENOMEM;
 		goto out;
@@ -351,6 +399,8 @@ static int mlx5e_rx_res_channels_init(struct mlx5e_rx_res *res)
 					    mlx5e_rqt_get_rqtn(&res->channels[ix].direct_rqt),
 					    inner_ft_support);
 		mlx5e_tir_builder_build_packet_merge(builder, &res->pkt_merge_param);
+		mlx5e_tir_builder_build_self_lb_block(builder, self_lb_blk,
+						      self_lb_blk);
 		mlx5e_tir_builder_build_direct(builder);
 
 		err = mlx5e_tir_init(&res->channels[ix].direct_tir, builder, res->mdev, true);
@@ -438,7 +488,7 @@ static void mlx5e_rx_res_ptp_destroy(struct mlx5e_rx_res *res)
 struct mlx5e_rx_res *
 mlx5e_rx_res_create(struct mlx5_core_dev *mdev, enum mlx5e_rx_res_features features,
 		    unsigned int max_nch, u32 drop_rqn,
-		    const struct mlx5e_packet_merge_param *init_pkt_merge_param,
+		    const struct mlx5e_packet_merge_param *pkt_merge_param,
 		    unsigned int init_nch)
 {
 	bool multi_vhca = features & MLX5E_RX_RES_FEATURE_MULTI_VHCA;
@@ -454,7 +504,7 @@ mlx5e_rx_res_create(struct mlx5_core_dev *mdev, enum mlx5e_rx_res_features featu
 	res->max_nch = max_nch;
 	res->drop_rqn = drop_rqn;
 
-	res->pkt_merge_param = *init_pkt_merge_param;
+	res->pkt_merge_param = *pkt_merge_param;
 	init_rwsem(&res->pkt_merge_param_sem);
 
 	err = mlx5e_rx_res_rss_init_def(res, init_nch);

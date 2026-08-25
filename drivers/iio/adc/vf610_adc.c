@@ -5,7 +5,6 @@
  * Copyright 2013 Freescale Semiconductor, Inc.
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/property.h>
@@ -832,7 +831,7 @@ static int vf610_adc_probe(struct platform_device *pdev)
 
 	indio_dev = devm_iio_device_alloc(&pdev->dev, sizeof(struct vf610_adc));
 	if (!indio_dev)
-		return dev_err_probe(&pdev->dev, -ENOMEM, "Failed allocating iio device\n");
+		return -ENOMEM;
 
 	info = iio_priv(indio_dev);
 	info->dev = &pdev->dev;

@@ -113,7 +113,7 @@ static bool fail_nth_next(struct __test_metadata *_metadata,
 	 * necessarily mean a test failure, just that the limit has to be made
 	 * bigger.
 	 */
-	ASSERT_GT(400, nth_state->iteration);
+	ASSERT_GT(1000, nth_state->iteration);
 	if (nth_state->iteration != 0) {
 		ssize_t res;
 		ssize_t res2;
@@ -712,7 +712,7 @@ TEST_FAIL_NTH(basic_fail_nth, device)
 		return -1;
 
 	if (_test_cmd_veventq_alloc(self->fd, viommu_id,
-				    IOMMU_VEVENTQ_TYPE_SELFTEST, &veventq_id,
+				    IOMMU_VEVENTQ_TYPE_SELFTEST, 2, &veventq_id,
 				    &veventq_fd))
 		return -1;
 	close(veventq_fd);

@@ -744,6 +744,7 @@ static const struct of_device_id wmt_mci_dt_ids[] = {
 	{ .compatible = "wm,wm8505-sdhc", .data = &wm8505_caps },
 	{ /* Sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, wmt_mci_dt_ids);
 
 static int wmt_mci_probe(struct platform_device *pdev)
 {
@@ -911,7 +912,6 @@ static void wmt_mci_remove(struct platform_device *pdev)
 	dev_info(&pdev->dev, "WMT MCI device removed\n");
 }
 
-#ifdef CONFIG_PM
 static int wmt_mci_suspend(struct device *dev)
 {
 	u32 reg_tmp;
@@ -963,18 +963,7 @@ static int wmt_mci_resume(struct device *dev)
 	return 0;
 }
 
-static const struct dev_pm_ops wmt_mci_pm = {
-	.suspend        = wmt_mci_suspend,
-	.resume         = wmt_mci_resume,
-};
-
-#define wmt_mci_pm_ops (&wmt_mci_pm)
-
-#else	/* !CONFIG_PM */
-
-#define wmt_mci_pm_ops NULL
-
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(wmt_mci_pm_ops, wmt_mci_suspend, wmt_mci_resume);
 
 static struct platform_driver wmt_mci_driver = {
 	.probe = wmt_mci_probe,
@@ -982,7 +971,7 @@ static struct platform_driver wmt_mci_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
-		.pm = wmt_mci_pm_ops,
+		.pm = pm_sleep_ptr(&wmt_mci_pm_ops),
 		.of_match_table = wmt_mci_dt_ids,
 	},
 };
@@ -992,4 +981,3 @@ module_platform_driver(wmt_mci_driver);
 MODULE_DESCRIPTION("Wondermedia MMC/SD Driver");
 MODULE_AUTHOR("Tony Prisk");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, wmt_mci_dt_ids);

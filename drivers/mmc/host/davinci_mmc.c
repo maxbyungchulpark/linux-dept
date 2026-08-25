@@ -145,17 +145,17 @@
 #define MAX_NR_SG	16
 
 static unsigned rw_threshold = 32;
-module_param(rw_threshold, uint, S_IRUGO);
+module_param(rw_threshold, uint, 0444);
 MODULE_PARM_DESC(rw_threshold,
 		"Read/Write threshold. Default = 32");
 
 static unsigned poll_threshold = 128;
-module_param(poll_threshold, uint, S_IRUGO);
+module_param(poll_threshold, uint, 0444);
 MODULE_PARM_DESC(poll_threshold,
 		 "Polling transaction size threshold. Default = 128");
 
 static unsigned poll_loopcount = 32;
-module_param(poll_loopcount, uint, S_IRUGO);
+module_param(poll_loopcount, uint, 0444);
 MODULE_PARM_DESC(poll_loopcount,
 		 "Maximum polling loop count. Default = 32");
 
@@ -588,7 +588,7 @@ static void mmc_davinci_request(struct mmc_host *mmc, struct mmc_request *req)
 		cpu_relax();
 	}
 	if (mmcst1 & MMCST1_BUSY) {
-		dev_err(mmc_dev(host->mmc), "still BUSY? bad ... \n");
+		dev_err(mmc_dev(host->mmc), "still BUSY? bad ...\n");
 		req->cmd->error = -ETIMEDOUT;
 		mmc_request_done(mmc, req);
 		return;
@@ -928,7 +928,7 @@ static irqreturn_t mmc_davinci_irq(int irq, void *dev_id)
 		}
 	}
 
-	if (qstatus & MMCST0_TOUTRD) {
+	if (data && (qstatus & MMCST0_TOUTRD)) {
 		/* Read data timeout */
 		data->error = -ETIMEDOUT;
 		end_transfer = 1;
@@ -940,7 +940,7 @@ static irqreturn_t mmc_davinci_irq(int irq, void *dev_id)
 		davinci_abort_data(host, data);
 	}
 
-	if (qstatus & (MMCST0_CRCWR | MMCST0_CRCRD)) {
+	if (data && (qstatus & (MMCST0_CRCWR | MMCST0_CRCRD))) {
 		/* Data CRC error */
 		data->error = -EILSEQ;
 		end_transfer = 1;
@@ -1294,14 +1294,10 @@ static int davinci_mmcsd_probe(struct platform_device *pdev)
 		goto cpu_freq_fail;
 	}
 
-	ret = mmc_add_host(mmc);
-	if (ret < 0)
-		goto mmc_add_host_fail;
-
 	ret = devm_request_irq(&pdev->dev, irq, mmc_davinci_irq, 0,
 			       mmc_hostname(mmc), host);
 	if (ret)
-		goto request_irq_fail;
+		goto mmc_add_host_fail;
 
 	if (host->sdio_irq >= 0) {
 		ret = devm_request_irq(&pdev->dev, host->sdio_irq,
@@ -1310,6 +1306,10 @@ static int davinci_mmcsd_probe(struct platform_device *pdev)
 		if (!ret)
 			mmc->caps |= MMC_CAP_SDIO_IRQ;
 	}
+
+	ret = mmc_add_host(mmc);
+	if (ret < 0)
+		goto mmc_add_host_fail;
 
 	rename_region(mem, mmc_hostname(mmc));
 
@@ -1324,8 +1324,6 @@ static int davinci_mmcsd_probe(struct platform_device *pdev)
 
 	return 0;
 
-request_irq_fail:
-	mmc_remove_host(mmc);
 mmc_add_host_fail:
 	mmc_davinci_cpufreq_deregister(host);
 cpu_freq_fail:
@@ -1347,7 +1345,6 @@ static void davinci_mmcsd_remove(struct platform_device *pdev)
 	clk_disable_unprepare(host->clk);
 }
 
-#ifdef CONFIG_PM
 static int davinci_mmcsd_suspend(struct device *dev)
 {
 	struct mmc_davinci_host *host = dev_get_drvdata(dev);
@@ -1373,21 +1370,14 @@ static int davinci_mmcsd_resume(struct device *dev)
 	return 0;
 }
 
-static const struct dev_pm_ops davinci_mmcsd_pm = {
-	.suspend        = davinci_mmcsd_suspend,
-	.resume         = davinci_mmcsd_resume,
-};
-
-#define davinci_mmcsd_pm_ops (&davinci_mmcsd_pm)
-#else
-#define davinci_mmcsd_pm_ops NULL
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(davinci_mmcsd_pm_ops,
+				davinci_mmcsd_suspend, davinci_mmcsd_resume);
 
 static struct platform_driver davinci_mmcsd_driver = {
 	.driver		= {
 		.name	= "davinci_mmc",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
-		.pm	= davinci_mmcsd_pm_ops,
+		.pm	= pm_sleep_ptr(&davinci_mmcsd_pm_ops),
 		.of_match_table = davinci_mmc_dt_ids,
 	},
 	.probe		= davinci_mmcsd_probe,

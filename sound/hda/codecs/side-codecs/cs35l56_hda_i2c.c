@@ -27,8 +27,6 @@ static int cs35l56_hda_i2c_probe(struct i2c_client *clt)
 	cs35l56->base.can_hibernate = true;
 #endif
 
-	cs35l56->base.fw_reg = &cs35l56_fw_reg;
-
 	cs35l56->base.regmap = devm_regmap_init_i2c(clt, &cs35l56_regmap_i2c);
 	if (IS_ERR(cs35l56->base.regmap)) {
 		ret = PTR_ERR(cs35l56->base.regmap);
@@ -53,10 +51,10 @@ static void cs35l56_hda_i2c_remove(struct i2c_client *clt)
 }
 
 static const struct i2c_device_id cs35l56_hda_i2c_id[] = {
-	{ "cs35l54-hda", 0x3554 },
-	{ "cs35l56-hda", 0x3556 },
-	{ "cs35l57-hda", 0x3557 },
-	{}
+	{ .name = "cs35l54-hda", .driver_data = 0x3554 },
+	{ .name = "cs35l56-hda", .driver_data = 0x3556 },
+	{ .name = "cs35l57-hda", .driver_data = 0x3557 },
+	{ }
 };
 
 static const struct acpi_device_id cs35l56_acpi_hda_match[] = {

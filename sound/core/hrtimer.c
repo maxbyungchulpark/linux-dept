@@ -20,7 +20,7 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS("snd-timer-" __stringify(SNDRV_TIMER_GLOBAL_HRTIMER));
 
 #define NANO_SEC	1000000000UL	/* 10^9 in sec */
-static unsigned int resolution;
+static unsigned int resolution __ro_after_init;
 
 struct snd_hrtimer {
 	struct snd_timer *timer;
@@ -44,7 +44,7 @@ static enum hrtimer_restart snd_hrtimer_callback(struct hrtimer *hrt)
 	}
 
 	/* calculate the drift */
-	delta = ktime_sub(hrt->base->get_time(), hrtimer_get_expires(hrt));
+	delta = ktime_sub(hrtimer_cb_get_time(hrt), hrtimer_get_expires(hrt));
 	if (delta > 0)
 		ticks += ktime_divns(delta, ticks * resolution);
 
@@ -64,7 +64,7 @@ static int snd_hrtimer_open(struct snd_timer *t)
 {
 	struct snd_hrtimer *stime;
 
-	stime = kzalloc(sizeof(*stime), GFP_KERNEL);
+	stime = kzalloc_obj(*stime);
 	if (!stime)
 		return -ENOMEM;
 	stime->timer = t;

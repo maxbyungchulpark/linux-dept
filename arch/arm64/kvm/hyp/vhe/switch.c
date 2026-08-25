@@ -43,8 +43,11 @@ DEFINE_PER_CPU(unsigned long, kvm_hyp_vector);
  *
  * - API/APK: they are already accounted for by vcpu_load(), and can
  *   only take effect across a load/put cycle (such as ERET)
+ *
+ * - FIEN: no way we let a guest have access to the RAS "Common Fault
+ *   Injection" thing, whatever that does
  */
-#define NV_HCR_GUEST_EXCLUDE	(HCR_TGE | HCR_API | HCR_APK)
+#define NV_HCR_GUEST_EXCLUDE	(HCR_TGE | HCR_API | HCR_APK | HCR_FIEN)
 
 static u64 __compute_hcr(struct kvm_vcpu *vcpu)
 {
@@ -92,6 +95,13 @@ static u64 __compute_hcr(struct kvm_vcpu *vcpu)
 			/* Force NV2 in case the guest is forgetful... */
 			guest_hcr |= HCR_NV2;
 		}
+
+		/*
+		 * Exclude the guest's TWED configuration if it hasn't set TWE
+		 * to avoid potentially delaying traps for the host.
+		 */
+		if (!(guest_hcr & HCR_TWE))
+			guest_hcr &= ~(HCR_EL2_TWEDEn | HCR_EL2_TWEDEL);
 	}
 
 	BUG_ON(host_data_test_flag(VCPU_IN_HYP_CONTEXT) &&
@@ -209,7 +219,7 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
 
 	__vcpu_load_switch_sysregs(vcpu);
 	__vcpu_load_activate_traps(vcpu);
-	__load_stage2(vcpu->arch.hw_mmu, vcpu->arch.hw_mmu->arch);
+	__load_stage2(vcpu->arch.hw_mmu);
 }
 
 void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
@@ -526,7 +536,7 @@ static const exit_handler_fn hyp_exit_handlers[] = {
 
 static inline bool fixup_guest_exit(struct kvm_vcpu *vcpu, u64 *exit_code)
 {
-	synchronize_vcpu_pstate(vcpu, exit_code);
+	synchronize_vcpu_pstate(vcpu);
 
 	/*
 	 * If we were in HYP context on entry, adjust the PSTATE view
@@ -653,7 +663,8 @@ static void __noreturn __hyp_call_panic(u64 spsr, u64 elr, u64 par)
 	host_ctxt = host_data_ptr(host_ctxt);
 	vcpu = host_ctxt->__hyp_running_vcpu;
 
-	__deactivate_traps(vcpu);
+	if (vcpu)
+		__deactivate_traps(vcpu);
 	sysreg_restore_host_state_vhe(host_ctxt);
 
 	panic("HYP panic:\nPS:%08llx PC:%016llx ESR:%08llx\nFAR:%016llx HPFAR:%016llx PAR:%016llx\nVCPU:%p\n",

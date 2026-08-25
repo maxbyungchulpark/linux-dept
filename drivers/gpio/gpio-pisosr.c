@@ -108,15 +108,11 @@ static const struct gpio_chip template_chip = {
 	.can_sleep		= true,
 };
 
-static void pisosr_mutex_destroy(void *lock)
-{
-	mutex_destroy(lock);
-}
-
 static int pisosr_gpio_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	struct pisosr_gpio *gpio;
+	u32 ngpios;
 	int ret;
 
 	gpio = devm_kzalloc(dev, sizeof(*gpio), GFP_KERNEL);
@@ -125,7 +121,8 @@ static int pisosr_gpio_probe(struct spi_device *spi)
 
 	gpio->chip = template_chip;
 	gpio->chip.parent = dev;
-	of_property_read_u16(dev->of_node, "ngpios", &gpio->chip.ngpio);
+	if (!of_property_read_u32(dev->of_node, "ngpios", &ngpios))
+		gpio->chip.ngpio = ngpios;
 
 	gpio->spi = spi;
 
@@ -139,8 +136,7 @@ static int pisosr_gpio_probe(struct spi_device *spi)
 		return dev_err_probe(dev, PTR_ERR(gpio->load_gpio),
 				     "Unable to allocate load GPIO\n");
 
-	mutex_init(&gpio->lock);
-	ret = devm_add_action_or_reset(dev, pisosr_mutex_destroy, &gpio->lock);
+	ret = devm_mutex_init(dev, &gpio->lock);
 	if (ret)
 		return ret;
 

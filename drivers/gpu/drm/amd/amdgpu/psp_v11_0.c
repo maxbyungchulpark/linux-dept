@@ -142,19 +142,44 @@ static int psp_v11_0_init_microcode(struct psp_context *psp)
 	return err;
 }
 
+static int psp_v11_wait_for_tos_unload(struct psp_context *psp)
+{
+	struct amdgpu_device *adev = psp->adev;
+	uint32_t sol_reg1, sol_reg2;
+	int retry_loop;
+
+	/* Wait for the TOS to be unloaded */
+	for (retry_loop = 0; retry_loop < 20; retry_loop++) {
+		sol_reg1 = RREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_81);
+		usleep_range(1000, 2000);
+		sol_reg2 = RREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_81);
+		if (sol_reg1 == sol_reg2)
+			return 0;
+	}
+	dev_err(adev->dev, "TOS unload failed, C2PMSG_33: %x C2PMSG_81: %x",
+		RREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_33),
+		RREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_81));
+
+	return -ETIME;
+}
+
 static int psp_v11_0_wait_for_bootloader(struct psp_context *psp)
 {
 	struct amdgpu_device *adev = psp->adev;
-
 	int ret;
 	int retry_loop;
 
-	for (retry_loop = 0; retry_loop < 10; retry_loop++) {
+	/* For a reset done at the end of S3, only wait for TOS to be unloaded */
+	if ((adev->in_s4 || adev->in_s3) && !(adev->flags & AMD_IS_APU) &&
+	    amdgpu_in_reset(adev))
+		return psp_v11_wait_for_tos_unload(psp);
+
+	for (retry_loop = 0; retry_loop < 20; retry_loop++) {
 		/* Wait for bootloader to signify that is
 		    ready having bit 31 of C2PMSG_35 set to 1 */
 		ret = psp_wait_for(
 			psp, SOC15_REG_OFFSET(MP0, 0, mmMP0_SMN_C2PMSG_35),
-			0x80000000, 0x80000000, PSP_WAITREG_NOVERBOSE);
+			0x80000000, 0x8000FFFF, PSP_WAITREG_NOVERBOSE);
 
 		if (ret == 0)
 			return 0;
@@ -192,7 +217,9 @@ static int psp_v11_0_bootloader_load_component(struct psp_context  	*psp,
 		return ret;
 
 	/* Copy PSP System Driver binary to memory */
-	psp_copy_fw(psp, bin_desc->start_addr, bin_desc->size_bytes);
+	ret = psp_copy_fw(psp, bin_desc->start_addr, bin_desc->size_bytes);
+	if (ret)
+		return ret;
 
 	/* Provide the sys driver to bootloader */
 	WREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_36,
@@ -238,7 +265,9 @@ static int psp_v11_0_bootloader_load_sos(struct psp_context *psp)
 		return ret;
 
 	/* Copy Secure OS binary to PSP memory */
-	psp_copy_fw(psp, psp->sos.start_addr, psp->sos.size_bytes);
+	ret = psp_copy_fw(psp, psp->sos.start_addr, psp->sos.size_bytes);
+	if (ret)
+		return ret;
 
 	/* Provide the PSP secure OS to bootloader */
 	WREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_36,
@@ -388,7 +417,7 @@ static int psp_v11_0_mode1_reset(struct psp_context *psp)
 			   MBOX_TOS_READY_MASK, 0);
 
 	if (ret) {
-		DRM_INFO("psp is not working correctly before mode1 reset!\n");
+		drm_info(adev_to_drm(adev), "psp is not working correctly before mode1 reset!\n");
 		return -EINVAL;
 	}
 
@@ -396,18 +425,6 @@ static int psp_v11_0_mode1_reset(struct psp_context *psp)
 	WREG32(offset, GFX_CTRL_CMD_ID_MODE1_RST);
 
 	msleep(500);
-
-	offset = SOC15_REG_OFFSET(MP0, 0, mmMP0_SMN_C2PMSG_33);
-
-	ret = psp_wait_for(psp, offset, MBOX_TOS_RESP_FLAG, MBOX_TOS_RESP_MASK,
-			   0);
-
-	if (ret) {
-		DRM_INFO("psp mode 1 reset failed!\n");
-		return -EINVAL;
-	}
-
-	DRM_INFO("psp mode1 reset succeed \n");
 
 	return 0;
 }
@@ -665,7 +682,8 @@ static const struct psp_funcs psp_v11_0_funcs = {
 	.ring_get_wptr = psp_v11_0_ring_get_wptr,
 	.ring_set_wptr = psp_v11_0_ring_set_wptr,
 	.load_usbc_pd_fw = psp_v11_0_load_usbc_pd_fw,
-	.read_usbc_pd_fw = psp_v11_0_read_usbc_pd_fw
+	.read_usbc_pd_fw = psp_v11_0_read_usbc_pd_fw,
+	.wait_for_bootloader = psp_v11_0_wait_for_bootloader
 };
 
 void psp_v11_0_set_psp_funcs(struct psp_context *psp)
